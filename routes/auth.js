@@ -49,9 +49,10 @@ router.post("/login", async (req, res) => {
       user: { id: user._id, name: user.name, email: user.email, role: user.role },
     });
   } catch (err) {
-    console.error("Login error:", err);
+    console.error("Login error: er", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
 export default router;
+ 
