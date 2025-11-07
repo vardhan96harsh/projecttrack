@@ -1,5 +1,6 @@
 {
   "name": "projecttrack-backend",
+  "engines": { "node": ">=18" },
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
