@@ -125,12 +125,15 @@ router.post("/stop", requireAuth, async (req, res) => {
 
 // GET /api/work-sessions/my
 router.get("/my", requireAuth, async (req, res) => {
-  const { from, to } = req.query;
+ const { from, to } = req.query;
   const q = { user: req.user._id };
   if (from || to) {
     q.date = {};
     if (from) q.date.$gte = from;
     if (to) q.date.$lte = to;
+  } else {
+    // ⬅ default to “today” only when no range passed
+    q.date = ymd(new Date());
   }
 
   const rows = await WorkSession.find(q)
@@ -253,10 +256,14 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
 
 /* ------------------------------- ADMIN EXPORT (CSV) --------------------------------
    GET /api/work-sessions/export?date=YYYY-MM-DD&from=&to=&company=&category=&project=&user=&machine=
-   Requires: requireAuth + requireRole("admin")
+        &group=compact|detail            // default: compact = 1 row per (Date+User+Company+Category+Project)
+        &unit=hours|minutes              // default: minutes
 ------------------------------------------------------------------------------------ */
 router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
-  const { date, from, to, company, category, project, user, machine } = req.query;
+  const { date, from, to, company, category, project, user, machine, group = "compact", unit = "minutes" } = req.query;
+
+  const useHours = String(unit).toLowerCase() === "hours";
+  const round2 = (n) => Math.round(n * 100) / 100;
 
   // ---- Build base query (same as /admin/list) ----
   const q = {};
@@ -293,11 +300,9 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
   }
 
   // machine filter
-  if (machine) {
-    q.machineId = machine;
-  }
+  if (machine) q.machineId = machine;
 
-  // We'll filter by company/category via populate match (same pattern as /admin/list)
+  // We'll filter by company/category via populate match
   const companyMatch =
     company && isValidObjectId(company)
       ? { _id: new mongoose.Types.ObjectId(company) }
@@ -337,89 +342,192 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
     return true;
   });
 
-  // ---- Shape for CSV ----
-  const shaped = filtered.map((s) => {
+  // ---- helpers ----
+  const computeTotalMinutes = (s) => {
     let total = s.accumulatedMinutes ?? 0;
     if (s.status === "active" && s.currentStart) {
       total += (Date.now() - new Date(s.currentStart)) / 60000;
     }
+    return Math.max(0, total);
+  };
 
-    // segments in "hh:mm AM/PM - hh:mm AM/PM" joined with "; "
-    const segs = Array.isArray(s.segments) ? s.segments : [];
-    const fmt12 = (dt) =>
-      dt
-        ? new Date(dt).toLocaleTimeString(undefined, {
-            hour: "numeric",
-            minute: "2-digit",
-            hour12: true,
-          })
-        : "";
-    const segmentsPretty = segs
-      .map((g) => `${fmt12(g.start)} - ${g.end ? fmt12(g.end) : ""}`)
-      .join("; ");
+  const convertValue = (minutes) => (useHours ? round2(minutes / 60) : round2(minutes));
+  const totalHeader = useHours ? "TotalHours" : "TotalMinutes";
 
-    const hostname = s.machineInfo?.hostname || "";
-    const machineShort = s.machineId || "";
-
-    return {
-      Date: s.date || "",
-      User: s.user?.name || "",
-      Email: s.user?.email || "",
-      Company: s.project?.company?.name || "—",
-      Category: s.project?.category?.name || "—",
-      Project: s.project?.name || "(No project)",
-      Status: s.status,
-      TotalMinutes: round2(total),
-      SegmentsCount: segs.length,
-      Segments: segmentsPretty,
-      Remarks: s.remarks || "",
-      MachineHost: hostname,
-      MachineId: machineShort,
-      CreatedAt: s.createdAt ? new Date(s.createdAt).toISOString() : "",
-      UpdatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : "",
-    };
-  });
-
-  // ---- Build CSV ----
-  const headers = Object.keys(shaped[0] || {
-    Date: "",
-    User: "",
-    Email: "",
-    Company: "",
-    Category: "",
-    Project: "",
-    Status: "",
-    TotalMinutes: "",
-    SegmentsCount: "",
-    Segments: "",
-    Remarks: "",
-    MachineHost: "",
-    MachineId: "",
-    CreatedAt: "",
-    UpdatedAt: "",
-  });
+  const fmt12 = (dt) =>
+    dt
+      ? new Date(dt).toLocaleTimeString(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        })
+      : "";
 
   const esc = (val) => {
     if (val == null) return "";
     const s = String(val);
-    // Escape quotes by doubling, wrap in quotes if contains comma/quote/newline
     if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
     return s;
-    };
+  };
 
-  const lines = [];
-  lines.push(headers.map(esc).join(","));
-  for (const row of shaped) {
+  if (group === "detail") {
+    // ---------- per session (original) ----------
+    const headers = [
+      "Date",
+      "Employee",
+      "Email",
+      "Company",
+      "Category",
+      "Project",
+      "Status",
+      totalHeader,
+      "SessionsCount",
+      "Segments",
+      "Remarks",
+      "MachineHost",
+      "MachineId",
+      "CreatedAt",
+      "UpdatedAt",
+    ];
+    const lines = [headers.join(",")];
+
+    for (const s of filtered) {
+      const minutes = computeTotalMinutes(s);
+      const total = convertValue(minutes);
+      const segs = Array.isArray(s.segments) ? s.segments : [];
+      const segmentsPretty = segs.map((g) => `${fmt12(g.start)} - ${g.end ? fmt12(g.end) : ""}`).join("; ");
+      const row = {
+        Date: s.date || "",
+        Employee: s.user?.name || "",
+        Email: s.user?.email || "",
+        Company: s.project?.company?.name || "—",
+        Category: s.project?.category?.name || "—",
+        Project: s.project?.name || "(No project)",
+        Status: s.status,
+        [totalHeader]: total,
+        SessionsCount: 1,
+        Segments: segmentsPretty,
+        Remarks: s.remarks || "",
+        MachineHost: s.machineInfo?.hostname || "",
+        MachineId: s.machineId || "",
+        CreatedAt: s.createdAt ? new Date(s.createdAt).toISOString() : "",
+        UpdatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : "",
+      };
+      lines.push(headers.map((h) => esc(row[h])).join(","));
+    }
+
+    const csv = lines.join("\r\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="work-sessions_detail_${unit}.csv"`);
+    return res.send(csv);
+  }
+
+  // ---------- compact (default): 1 row per Date+User+Company+Category+Project ----------
+  const keyOf = (s) => [
+    s.date || "",
+    s.user?._id?.toString() || "",
+    s.project?.company?._id?.toString() || "",
+    s.project?.category?._id?.toString() || "",
+    s.project?._id?.toString() || "",
+  ].join("|");
+
+  const groups = new Map();
+  for (const s of filtered) {
+    const k = keyOf(s);
+    if (!groups.has(k)) {
+      groups.set(k, {
+        Date: s.date || "",
+        Employee: s.user?.name || "",
+        Email: s.user?.email || "",
+        Company: s.project?.company?.name || "—",
+        Category: s.project?.category?.name || "—",
+        Project: s.project?.name || "(No project)",
+        TotalMinutes: 0,
+        SessionsCount: 0,
+        SegmentsCount: 0,
+        Segments: [],
+        Remarks: [],
+        MachineHosts: new Set(),
+        MachineIds: new Set(),
+        FirstCreatedAt: s.createdAt ? new Date(s.createdAt).toISOString() : "",
+        LastUpdatedAt: s.updatedAt ? new Date(s.updatedAt).toISOString() : "",
+      });
+    }
+    const g = groups.get(k);
+
+    const minutes = computeTotalMinutes(s);
+    g.TotalMinutes = (g.TotalMinutes || 0) + minutes;
+    g.SessionsCount += 1;
+
+    const segs = Array.isArray(s.segments) ? s.segments : [];
+    g.SegmentsCount += segs.length;
+    if (segs.length) {
+      g.Segments.push(
+        ...segs.map((it) => `${fmt12(it.start)} - ${it.end ? fmt12(it.end) : ""}`)
+      );
+    }
+
+    if (s.remarks) g.Remarks.push(s.remarks);
+    if (s.machineInfo?.hostname) g.MachineHosts.add(s.machineInfo.hostname);
+    if (s.machineId) g.MachineIds.add(s.machineId);
+
+    if (s.createdAt) {
+      const iso = new Date(s.createdAt).toISOString();
+      if (!g.FirstCreatedAt || iso < g.FirstCreatedAt) g.FirstCreatedAt = iso;
+    }
+    if (s.updatedAt) {
+      const iso = new Date(s.updatedAt).toISOString();
+      if (!g.LastUpdatedAt || iso > g.LastUpdatedAt) g.LastUpdatedAt = iso;
+    }
+  }
+
+  const headers = [
+    "Date",
+    "Employee",
+    "Email",
+    "Company",
+    "Category",
+    "Project",
+    totalHeader,
+    "SessionsCount",
+    "SegmentsCount",
+    "Segments",
+    "Remarks",
+    "MachineHosts",
+    "MachineIds",
+    "FirstCreatedAt",
+    "LastUpdatedAt",
+  ];
+
+  const lines = [headers.join(",")];
+  for (const g of groups.values()) {
+    const row = {
+      Date: g.Date,
+      Employee: g.Employee,
+      Email: g.Email,
+      Company: g.Company,
+      Category: g.Category,
+      Project: g.Project,
+      [totalHeader]: convertValue(g.TotalMinutes || 0),
+      SessionsCount: g.SessionsCount,
+      SegmentsCount: g.SegmentsCount,
+      Segments: g.Segments.join("; "),
+      Remarks: Array.from(new Set(g.Remarks)).join(" | "),
+      MachineHosts: Array.from(g.MachineHosts).join(" | "),
+      MachineIds: Array.from(g.MachineIds).join(" | "),
+      FirstCreatedAt: g.FirstCreatedAt,
+      LastUpdatedAt: g.LastUpdatedAt,
+    };
     lines.push(headers.map((h) => esc(row[h])).join(","));
   }
-  const csv = lines.join("\n");
 
-  // ---- Send CSV ----
-  const filename = `work-sessions_${(from || date || "all")}_to_${(to || date || "all")}.csv`;
+  const filename = `work-sessions_compact_${unit}_${from || date || "all"}_to_${to || date || "all"}.csv`;
+  const csv = lines.join("\r\n");
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
   res.send(csv);
 });
+
 
 
 export default router;
