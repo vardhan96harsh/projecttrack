@@ -13,6 +13,13 @@ const workSessionSchema = new mongoose.Schema(
     accumulatedMinutes: { type: Number, default: 0 }, // float minutes
     currentStart: Date,
     remarks: String,
+        // 🔹 Work type for this session
+    taskType: {
+      type: String,
+      enum: ["Alpha", "Beta", "CR", "Rework"],
+      default: "Alpha",
+    },
+
 
     // ⬇️ NEW
     machineId: String,

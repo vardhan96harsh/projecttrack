@@ -7,6 +7,8 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 
 const router = express.Router();
 const round2 = (n) => Math.round(n * 100) / 100;
+const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework"]; // 🔹 work type options
+
 
 function ymd(d = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -15,19 +17,49 @@ function ymd(d = new Date()) {
 function isValidObjectId(v) { return mongoose.Types.ObjectId.isValid(v); }
 
 /* ---------------------------- EMPLOYEE ACTIONS ----------------------------- */
+// GET /api/work-sessions/work-types
+router.get("/work-types", requireAuth, async (req, res) => {
+  res.json(WORK_TYPES);
+});
 
 // POST /api/work-sessions/start
+// POST /api/work-sessions/start
 router.post("/start", requireAuth, async (req, res) => {
-  const { projectId, remarks = "", machineId, machineInfo } = req.body || {};
-  if (!projectId) return res.status(400).json({ error: "projectId is required" });
+  // accept both `taskType` (current frontend) and `workType` (future/backwards)
+  const {
+    projectId,
+    remarks = "",
+    machineId,
+    machineInfo,
+    taskType,
+    workType,
+  } = req.body || {};
+
+  if (!projectId) {
+    return res.status(400).json({ error: "projectId is required" });
+  }
+
+  // pick one; prefer taskType from frontend
+  const requestedType = taskType || workType;
+  const chosenType = WORK_TYPES.includes(requestedType)
+    ? requestedType
+    : "Alpha";
 
   const project = await Project.findById(projectId)
     .select("_id name")
     .populate("company category", "name");
-  if (!project) return res.status(404).json({ error: "Project not found" });
 
-  const existing = await WorkSession.findOne({ user: req.user._id, status: "active" });
-  if (existing) return res.status(400).json({ error: "An active session already exists." });
+  if (!project) {
+    return res.status(404).json({ error: "Project not found" });
+  }
+
+  const existing = await WorkSession.findOne({
+    user: req.user._id,
+    status: "active",
+  });
+  if (existing) {
+    return res.status(400).json({ error: "An active session already exists." });
+  }
 
   const session = await WorkSession.create({
     user: req.user._id,
@@ -38,7 +70,7 @@ router.post("/start", requireAuth, async (req, res) => {
     accumulatedMinutes: 0,
     currentStart: new Date(),
     remarks,
-    // persist machine identity if provided by desktop app
+    taskType: chosenType,           // ✅ saved in schema
     machineId: machineId || undefined,
     machineInfo: machineInfo || undefined,
   });
@@ -49,6 +81,7 @@ router.post("/start", requireAuth, async (req, res) => {
     totalMinutes: round2(session.accumulatedMinutes || 0),
   });
 });
+
 
 // POST /api/work-sessions/pause
 router.post("/pause", requireAuth, async (req, res) => {
@@ -165,6 +198,7 @@ router.get("/my", requireAuth, async (req, res) => {
       accumulatedMinutes: s.accumulatedMinutes ?? 0,
       totalMinutes: round2(total),
       remarks: s.remarks || "",
+        taskType: s.taskType || null,  
       machineId: s.machineId || null,
       machineInfo: s.machineInfo || null,
       createdAt: s.createdAt,
@@ -177,7 +211,7 @@ router.get("/my", requireAuth, async (req, res) => {
 /* ----------------------------- ADMIN LIST ---------------------------------- */
 
 router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) => {
-  const { date, from, to, company, category, project, user, machine } = req.query;
+  const { date, from, to, company, category, project, user, machine, taskType  } = req.query;
 
   const q = {};
   if (date) q.date = date;
@@ -206,6 +240,11 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   if (machine) {
     q.machineId = machine;
   }
+    // ⬇ NEW: filter by work type if provided and valid
+  if (taskType && WORK_TYPES.includes(taskType)) {
+    q.taskType = taskType;
+  }
+
 
   const rows = await WorkSession.find(q)
     .populate({
@@ -244,6 +283,7 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       companyName: s.project?.company?.name || "—",
       categoryId: s.project?.category?._id || null,
       categoryName: s.project?.category?.name || "—",
+        taskType: s.taskType || null,  
 
       // expose machine in admin payload
       machineId: s.machineId || null,
@@ -260,7 +300,7 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
         &unit=hours|minutes              // default: minutes
 ------------------------------------------------------------------------------------ */
 router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
-  const { date, from, to, company, category, project, user, machine, group = "compact", unit = "minutes" } = req.query;
+  const { date, from, to, company, category, project, user, machine,taskType, group = "compact", unit = "minutes" } = req.query;
 
   const useHours = String(unit).toLowerCase() === "hours";
   const round2 = (n) => Math.round(n * 100) / 100;
@@ -301,6 +341,11 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
 
   // machine filter
   if (machine) q.machineId = machine;
+    // work type filter
+  if (taskType && WORK_TYPES.includes(taskType)) {
+    q.taskType = taskType;
+  }
+
 
   // We'll filter by company/category via populate match
   const companyMatch =
@@ -380,6 +425,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
       "Category",
       "Project",
       "Status",
+       "TaskType", 
       totalHeader,
       "SessionsCount",
       "Segments",
@@ -404,6 +450,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Category: s.project?.category?.name || "—",
         Project: s.project?.name || "(No project)",
         Status: s.status,
+         TaskType: s.taskType || "",  
         [totalHeader]: total,
         SessionsCount: 1,
         Segments: segmentsPretty,
