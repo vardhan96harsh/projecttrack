@@ -25,7 +25,6 @@ router.get("/work-types", requireAuth, async (req, res) => {
 // POST /api/work-sessions/start
 // POST /api/work-sessions/start
 router.post("/start", requireAuth, async (req, res) => {
-  // accept both `taskType` (current frontend) and `workType` (future/backwards)
   const {
     projectId,
     remarks = "",
@@ -35,52 +34,88 @@ router.post("/start", requireAuth, async (req, res) => {
     workType,
   } = req.body || {};
 
-  if (!projectId) {
-    return res.status(400).json({ error: "projectId is required" });
-  }
+ // allow custom task if no project is selected
+if (!projectId && !remarks) {
+  return res.status(400).json({
+    error: "Either projectId or customTask (remarks) is required.",
+  });
+}
 
-  // pick one; prefer taskType from frontend
+
   const requestedType = taskType || workType;
   const chosenType = WORK_TYPES.includes(requestedType)
     ? requestedType
     : "Alpha";
 
-  const project = await Project.findById(projectId)
+  const todayStr = ymd(new Date());
+
+  // 🔹 1) Auto-stop any old active sessions from previous days
+  const staleResult = await WorkSession.updateMany(
+    {
+      user: req.user._id,
+      status: "active",
+      date: { $ne: todayStr },
+    },
+    {
+      $set: { status: "stopped", currentStart: null },
+    }
+  );
+  console.log("Auto-stopped stale active sessions:", staleResult.modifiedCount);
+
+  // 🔹 2) Now only look for active *today*
+  const existing = await WorkSession.findOne({
+    user: req.user._id,
+    status: "active",
+    date: todayStr,
+  });
+
+  if (existing) {
+    console.log("⛔ /start – active session already exists for today:", existing._id);
+    return res
+      .status(400)
+      .json({ error: "An active session already exists for today." });
+  }
+
+ let project = null;
+
+if (projectId) {
+  project = await Project.findById(projectId)
     .select("_id name")
     .populate("company category", "name");
 
   if (!project) {
     return res.status(404).json({ error: "Project not found" });
   }
+}
 
-  const existing = await WorkSession.findOne({
-    user: req.user._id,
-    status: "active",
-  });
-  if (existing) {
-    return res.status(400).json({ error: "An active session already exists." });
-  }
+
 
   const session = await WorkSession.create({
     user: req.user._id,
-    project: project._id,
-    date: ymd(new Date()),
+   project: project ? project._id : null,
+
+    date: todayStr,
     status: "active",
     segments: [],
     accumulatedMinutes: 0,
     currentStart: new Date(),
     remarks,
-    taskType: chosenType,           // ✅ saved in schema
+    customTask: project ? null : remarks, 
+    taskType: chosenType,
     machineId: machineId || undefined,
     machineInfo: machineInfo || undefined,
   });
 
+  console.log("✅ /start OK – new session", session._id, "taskType =", chosenType);
+
   res.json({
     ...session.toObject(),
-    projectName: project.name,
+    projectName: project ? project.name : remarks || "(No project)",
+
     totalMinutes: round2(session.accumulatedMinutes || 0),
   });
 });
+
 
 
 // POST /api/work-sessions/pause
@@ -191,7 +226,8 @@ router.get("/my", requireAuth, async (req, res) => {
       date: s.date,
       status: s.status,
       projectId: s.project?._id || null,
-      projectName: s.project?.name || "(No project)",
+      projectName: s.project?.name || s.customTask || "(No project)",
+
       companyName: s.project?.company?.name || "—",
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
@@ -278,7 +314,8 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       userEmail: s.user?.email || "",
 
       projectId: s.project?._id || null,
-      projectName: s.project?.name || "(No project)",
+     projectName: s.project?.name || s.customTask || "(No project)",
+
       companyId: s.project?.company?._id || null,
       companyName: s.project?.company?.name || "—",
       categoryId: s.project?.category?._id || null,

@@ -6,7 +6,8 @@ const segmentSchema = new mongoose.Schema({ start: Date, end: Date });
 const workSessionSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", required: true },
+   project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", default: null },
+
     date: String, // YYYY-MM-DD
     status: { type: String, enum: ["active", "paused", "stopped"], default: "active" },
     segments: [segmentSchema],
@@ -19,6 +20,7 @@ const workSessionSchema = new mongoose.Schema(
       enum: ["Alpha", "Beta", "CR", "Rework"],
       default: "Alpha",
     },
+customTask: { type: String, default: null },
 
 
     // ⬇️ NEW
