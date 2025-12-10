@@ -27,6 +27,7 @@ router.get("/work-types", requireAuth, async (req, res) => {
 router.post("/start", requireAuth, async (req, res) => {
   const {
     projectId,
+     customTask,
     remarks = "",
     machineId,
     machineInfo,
@@ -35,11 +36,12 @@ router.post("/start", requireAuth, async (req, res) => {
   } = req.body || {};
 
  // allow custom task if no project is selected
-if (!projectId && !remarks) {
+if (!projectId && !customTask) {
   return res.status(400).json({
-    error: "Either projectId or customTask (remarks) is required.",
+    error: "Either projectId or customTask is required.",
   });
 }
+
 
 
   const requestedType = taskType || workType;
@@ -100,7 +102,8 @@ if (projectId) {
     accumulatedMinutes: 0,
     currentStart: new Date(),
     remarks,
-    customTask: project ? null : remarks, 
+    customTask: project ? null : (customTask || null),
+
     taskType: chosenType,
     machineId: machineId || undefined,
     machineInfo: machineInfo || undefined,
@@ -110,7 +113,10 @@ if (projectId) {
 
   res.json({
     ...session.toObject(),
-    projectName: project ? project.name : remarks || "(No project)",
+   projectName: project 
+  ? project.name 
+  : customTask || "(Custom Task)",
+
 
     totalMinutes: round2(session.accumulatedMinutes || 0),
   });
@@ -226,7 +232,8 @@ router.get("/my", requireAuth, async (req, res) => {
       date: s.date,
       status: s.status,
       projectId: s.project?._id || null,
-      projectName: s.project?.name || s.customTask || "(No project)",
+      projectName: s.project?.name || s.customTask || "(Custom Task)",
+
 
       companyName: s.project?.company?.name || "—",
       categoryName: s.project?.category?.name || "—",
@@ -485,8 +492,8 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-        Project: s.project?.name || "(No project)",
-        Status: s.status,
+       Project: s.project?.name || s.customTask || "(Custom Task)",
+         Status: s.status,
          TaskType: s.taskType || "",  
         [totalHeader]: total,
         SessionsCount: 1,
@@ -525,7 +532,8 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-        Project: s.project?.name || "(No project)",
+       Project: s.project?.name || s.customTask || "(Custom Task)",
+
         TotalMinutes: 0,
         SessionsCount: 0,
         SegmentsCount: 0,
