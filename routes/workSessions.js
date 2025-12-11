@@ -4,10 +4,12 @@ import WorkSession from "../models/WorkSession.js";
 import Project from "../models/Project.js";
 import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import ManualRemark from "../models/ManualRemark.js";
+
 
 const router = express.Router();
 const round2 = (n) => Math.round(n * 100) / 100;
-const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework"]; // 🔹 work type options
+const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc"]; // 🔹 work type options
 
 
 function ymd(d = new Date()) {
@@ -288,6 +290,43 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
     q.taskType = taskType;
   }
 
+  // -------------------------------------------------------------
+// Load Manual Remarks for matching date range + user
+// -------------------------------------------------------------
+// -------------------------------------------------------------
+// Load Manual Remarks for matching date + user
+// -------------------------------------------------------------
+const remarkQuery = {};
+
+// Case 1: Admin selects a single date
+if (date) {
+  remarkQuery.date = date;
+}
+
+// Case 2: Admin selects a date range
+if (from || to) {
+  remarkQuery.date = {};
+  if (from) remarkQuery.date.$gte = from;
+  if (to) remarkQuery.date.$lte = to;
+}
+
+// If admin filters by user
+if (q.user) {
+  remarkQuery.user = q.user;
+}
+
+// Fetch matching remarks
+const allRemarks = await ManualRemark.find(remarkQuery).lean();
+
+// Map remarks by "date|userId"
+const remarkMap = new Map();
+for (const r of allRemarks) {
+  const key = `${r.date}|${r.user.toString()}`;
+  if (!remarkMap.has(key)) remarkMap.set(key, []);
+  remarkMap.get(key).push(r.text);
+}
+
+
 
   const rows = await WorkSession.find(q)
     .populate({
@@ -314,6 +353,8 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       totalMinutes: round2(total),
       segments: s.segments || [],
       remarks: s.remarks || "",
+      manualRemarks: remarkMap.get(`${s.date}|${s.user?._id}`) || [],
+
       createdAt: s.createdAt,
 
       userId: s.user?._id || null,

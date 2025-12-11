@@ -8,10 +8,11 @@ import companyRoutes from "./routes/companies.js";
 import categoryRoutes from "./routes/categories.js";
 import projectRoutes from "./routes/projects.js";
 import userRoutes from "./routes/users.js";
-import timesheetRoutes from "./routes/timesheets.js";
+// import timesheetRoutes from "./routes/timesheets.js";
 import reportRoutes from "./routes/reports.js";
 import machinesRouter from "./routes/machines.js";
 import workSessionsRouter from "./routes/workSessions.js";
+import manualRemarkRoutes from "./routes/manualRemarks.js";
 
 dotenv.config();
 
@@ -45,10 +46,11 @@ app.use("/api/companies", companyRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/users", userRoutes);
-app.use("/api/timesheets", timesheetRoutes);
+// app.use("/api/timesheets", timesheetRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/machines", machinesRouter);
 app.use("/api/work-sessions", workSessionsRouter);
+app.use("/api/manual-remarks", manualRemarkRoutes);
 
 const PORT = process.env.PORT || 3001;
 const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";

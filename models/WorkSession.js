@@ -18,7 +18,7 @@ const workSessionSchema = new mongoose.Schema(
         // 🔹 Work type for this session
     taskType: {
       type: String,
-      enum: ["Alpha", "Beta", "CR", "Rework"],
+      enum: ["Alpha", "Beta", "CR", "Rework", "poc"],
       default: "Alpha",
     },
 
