@@ -22,10 +22,30 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
 });
 
 router.put("/:id", requireAuth, requireRole("admin"), async (req, res) => {
-  const { name, company, category } = req.body;
-  const updated = await Project.findByIdAndUpdate(req.params.id, { name, company, category }, { new: true });
-  res.json(updated);
+  try {
+    const { name, company, category } = req.body;
+
+    if (!name || !company || !category) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    const updated = await Project.findByIdAndUpdate(
+      req.params.id,
+      {
+        name: name.trim(),
+        company,
+        category,
+      },
+      { new: true }
+    );
+
+    res.json(updated);
+  } catch (err) {
+    console.error("PROJECT UPDATE ERROR:", err);
+    res.status(500).json({ error: "Update failed" });
+  }
 });
+
 
 router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
   await Project.findByIdAndDelete(req.params.id);
