@@ -241,7 +241,10 @@ router.get("/my", requireAuth, async (req, res) => {
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
       accumulatedMinutes: s.accumulatedMinutes ?? 0,
-      totalMinutes: round2(total),
+      // totalMinutes: round2(total),
+      
+    totalMinutes: round2(s.accumulatedMinutes ?? 0),
+ segments: s.segments || [],  
       remarks: s.remarks || "",
         taskType: s.taskType || null,  
       machineId: s.machineId || null,
