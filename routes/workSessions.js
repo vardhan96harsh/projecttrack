@@ -9,7 +9,7 @@ import ManualRemark from "../models/ManualRemark.js";
 
 const router = express.Router();
 const round2 = (n) => Math.round(n * 100) / 100;
-const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc"]; // 🔹 work type options
+const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc","Analysis","Storyboard QA","Output QA"]; // 🔹 work type options
 
 
 function ymd(d = new Date()) {
