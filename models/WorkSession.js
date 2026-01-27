@@ -27,6 +27,8 @@ const workSessionSchema = new mongoose.Schema(
     // ⬇️ NEW
     machineId: String,
     machineInfo: mongoose.Schema.Types.Mixed,
+    lastHeartbeatAt: { type: Date, default: null },
+
   },
   { timestamps: true }
 );

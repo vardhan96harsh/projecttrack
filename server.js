@@ -67,3 +67,33 @@ mongoose
     console.error("❌ Mongo connection error:", err.message);
     process.exit(1);
   });
+
+
+
+
+  // mongoose
+  // .connect(MONGO)
+  // .then(() => {
+  //   console.log("✅ MongoDB connected");
+
+  //   app.listen(PORT, "0.0.0.0", () => {
+  //     console.log("🚀 API listening on", PORT);
+
+  //     // ✅ Run once immediately (optional but helpful)
+  //     autoStopAbandonedSessions().catch((e) =>
+  //       console.error("autoStop first run error:", e)
+  //     );
+
+  //     // ✅ Then run every 1 minute
+  //     setInterval(() => {
+  //       autoStopAbandonedSessions().catch((e) =>
+  //         console.error("autoStop interval error:", e)
+  //       );
+  //     }, 60 * 1000);
+  //   });
+  // })
+  // .catch((err) => {
+  //   console.error("❌ Mongo connection error:", err.message);
+  //   process.exit(1);
+  // });
+

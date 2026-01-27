@@ -53,30 +53,7 @@ if (!projectId && !customTask) {
 
   const todayStr = ymd(new Date());
 
-const HEARTBEAT_TIMEOUT_MIN = 10;
-const cutoff = new Date(Date.now() - HEARTBEAT_TIMEOUT_MIN * 60 * 1000);
 
-const staleSessions = await WorkSession.find({
-  user: req.user._id,
-  status: "active",
-  updatedAt: { $lt: cutoff },
-});
-
-for (const s of staleSessions) {
-  if (s.currentStart) {
-    const endTime = s.updatedAt || new Date();
-    s.segments.push({ start: s.currentStart, end: endTime });
-
-    const ms = endTime - new Date(s.currentStart);
-    s.accumulatedMinutes += ms > 0 ? ms / 60000 : 0;
-  }
-
-  s.status = "stopped";
-  s.currentStart = null;
-  s.remarks = "Auto-stopped due to system shutdown";
-
-  await s.save();
-}
 
   
 
@@ -220,9 +197,16 @@ router.get("/my", requireAuth, async (req, res) => {
 
   // 🔥 HEARTBEAT: mark active session as alive
 await WorkSession.updateMany(
-  { user: req.user._id, status: "active" },
-  { $set: { updatedAt: new Date() } }
+  {
+    user: req.user._id,
+    status: "active",
+    currentStart: { $ne: null }   // ✅ ONLY RUNNING SESSION
+  },
+  {
+    $set: { lastHeartbeatAt: new Date() }
+  }
 );
+
 
  const { from, to } = req.query;
   const q = { user: req.user._id };
@@ -278,6 +262,17 @@ await WorkSession.updateMany(
 
   res.json(data);
 });
+
+
+// 🔥 HEARTBEAT – keep active session alive
+router.post("/heartbeat", requireAuth, async (req, res) => {
+  await WorkSession.updateOne(
+    { user: req.user._id, status: "active" },
+    { $set: { lastHeartbeatAt: new Date() } }
+  );
+  res.json({ ok: true });
+});
+
 
 /* ----------------------------- ADMIN LIST ---------------------------------- */
 
