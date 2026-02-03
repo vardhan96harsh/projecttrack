@@ -13,6 +13,7 @@ import reportRoutes from "./routes/reports.js";
 import machinesRouter from "./routes/machines.js";
 import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
+import { autoStopAbandonedSessions } from "./cron/autoStopSessions.js";
 
 dotenv.config();
 
@@ -55,45 +56,53 @@ app.use("/api/manual-remarks", manualRemarkRoutes);
 const PORT = process.env.PORT || 3001;
 const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";
 
-mongoose
-  .connect(MONGO)
-  .then(() => {
-    console.log("✅ MongoDB connected");
-    app.listen(PORT, "0.0.0.0", () =>
-      console.log("🚀 API listening on", PORT)
-    );
-  })
-  .catch((err) => {
-    console.error("❌ Mongo connection error:", err.message);
-    process.exit(1);
-  });
+// mongoose
+//   .connect(MONGO)
+//   .then(() => {
+//     console.log("✅ MongoDB connected");
+//     app.listen(PORT, "0.0.0.0", () =>
+//       console.log("🚀 API listening on", PORT)
+//     );
+//   })
+//   .catch((err) => {
+//     console.error("❌ Mongo connection error:", err.message);
+//     process.exit(1);
+//   });
 
 
 
 
-  // mongoose
-  // .connect(MONGO)
-  // .then(() => {
-  //   console.log("✅ MongoDB connected");
+      mongoose
+      .connect(MONGO)
+      .then(() => {
+        console.log("✅ MongoDB connected");
 
-  //   app.listen(PORT, "0.0.0.0", () => {
-  //     console.log("🚀 API listening on", PORT);
+        app.listen(PORT, "0.0.0.0", () => {
+          console.log("🚀 API listening on", PORT);
 
-  //     // ✅ Run once immediately (optional but helpful)
-  //     autoStopAbandonedSessions().catch((e) =>
-  //       console.error("autoStop first run error:", e)
-  //     );
+          // ✅ Run once immediately (optional but helpful)
+          autoStopAbandonedSessions().catch((e) =>
+            console.error("autoStop first run error:", e)
+          );
 
-  //     // ✅ Then run every 1 minute
-  //     setInterval(() => {
-  //       autoStopAbandonedSessions().catch((e) =>
-  //         console.error("autoStop interval error:", e)
-  //       );
-  //     }, 60 * 1000);
-  //   });
-  // })
-  // .catch((err) => {
-  //   console.error("❌ Mongo connection error:", err.message);
-  //   process.exit(1);
-  // });
+          // ✅ Then run every 1 minute
+        setInterval(async () => {
+  try {
+    if (mongoose.connection.readyState !== 1) {
+      console.warn("Mongo not connected, skipping autoStop");
+      return;
+    }
+
+    await autoStopAbandonedSessions();
+  } catch (e) {
+    console.error("autoStop interval error (ignored):", e.message);
+  }
+}, 60 * 1000);
+
+        });
+      })
+      .catch((err) => {
+        console.error("❌ Mongo connection error:", err.message);
+        process.exit(1);
+      });
 
