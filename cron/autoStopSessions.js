@@ -1,30 +1,16 @@
 // cron/autoStopSessions.js
 import WorkSession from "../models/WorkSession.js";
 
-const HEARTBEAT_TIMEOUT_MIN = Number(process.env.HEARTBEAT_TIMEOUT_MIN || 10);
+const HEARTBEAT_TIMEOUT_MIN = Number(process.env.HEARTBEAT_TIMEOUT_MIN || 15);
 
 export async function autoStopAbandonedSessions() {
   const cutoff = new Date(Date.now() - HEARTBEAT_TIMEOUT_MIN * 60 * 1000);
 
-const GRACE_MINUTES = 2;
-
-const graceCutoff = new Date(
-  Date.now() - GRACE_MINUTES * 60 * 1000
-);
-
-const sessions = await WorkSession.find({
-  status: "active",
-  currentStart: { $ne: null },
-
-  // ❗ do NOT touch very new sessions
-  createdAt: { $lt: graceCutoff },
-
-  $or: [
-    { lastHeartbeatAt: { $lt: cutoff } },
-    { lastHeartbeatAt: null }
-  ],
-});
-
+  const sessions = await WorkSession.find({
+    status: "active",
+    currentStart: { $ne: null },
+    lastHeartbeatAt: { $lt: cutoff },
+  });
 
   for (const s of sessions) {
     const endTime = new Date();
@@ -49,3 +35,4 @@ const sessions = await WorkSession.find({
     console.log(`🛑 Auto-stopped sessions: ${sessions.length}`);
   }
 }
+

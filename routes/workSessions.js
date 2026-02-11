@@ -9,7 +9,7 @@ import ManualRemark from "../models/ManualRemark.js";
 
 const router = express.Router();
 const round2 = (n) => Math.round(n * 100) / 100;
-const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc","Analysis","Storyboard QA","Output QA"]; // 🔹 work type options
+const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc", "Analysis", "Storyboard QA", "Output QA"]; // 🔹 work type options
 
 
 function ymd(d = new Date()) {
@@ -29,7 +29,7 @@ router.get("/work-types", requireAuth, async (req, res) => {
 router.post("/start", requireAuth, async (req, res) => {
   const {
     projectId,
-     customTask,
+    customTask,
     remarks = "",
     machineId,
     machineInfo,
@@ -37,12 +37,12 @@ router.post("/start", requireAuth, async (req, res) => {
     workType,
   } = req.body || {};
 
- // allow custom task if no project is selected
-if (!projectId && !customTask) {
-  return res.status(400).json({
-    error: "Either projectId or customTask is required.",
-  });
-}
+  // allow custom task if no project is selected
+  if (!projectId && !customTask) {
+    return res.status(400).json({
+      error: "Either projectId or customTask is required.",
+    });
+  }
 
 
 
@@ -55,7 +55,7 @@ if (!projectId && !customTask) {
 
 
 
-  
+
 
   // 🔹 1) Auto-stop any old active sessions from previous days
 
@@ -73,29 +73,30 @@ if (!projectId && !customTask) {
       .json({ error: "An active session already exists for today." });
   }
 
- let project = null;
+  let project = null;
 
-if (projectId) {
-  project = await Project.findById(projectId)
-    .select("_id name")
-    .populate("company category", "name");
+  if (projectId) {
+    project = await Project.findById(projectId)
+      .select("_id name")
+      .populate("company category", "name");
 
-  if (!project) {
-    return res.status(404).json({ error: "Project not found" });
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
   }
-}
 
 
 
   const session = await WorkSession.create({
     user: req.user._id,
-   project: project ? project._id : null,
+    project: project ? project._id : null,
 
     date: todayStr,
     status: "active",
     segments: [],
     accumulatedMinutes: 0,
     currentStart: new Date(),
+     lastHeartbeatAt: new Date(),  
     remarks,
     customTask: project ? null : (customTask || null),
 
@@ -108,9 +109,9 @@ if (projectId) {
 
   res.json({
     ...session.toObject(),
-   projectName: project 
-  ? project.name 
-  : customTask || "(Custom Task)",
+    projectName: project
+      ? project.name
+      : customTask || "(Custom Task)",
 
 
     totalMinutes: round2(session.accumulatedMinutes || 0),
@@ -154,6 +155,7 @@ router.post("/resume", requireAuth, async (req, res) => {
 
   session.status = "active";
   session.currentStart = new Date();
+   session.lastHeartbeatAt = new Date(); 
 
   if (machineId) session.machineId = machineId;
   if (machineInfo) session.machineInfo = machineInfo;
@@ -194,28 +196,14 @@ router.post("/stop", requireAuth, async (req, res) => {
 
 // GET /api/work-sessions/my
 router.get("/my", requireAuth, async (req, res) => {
-
-  // 🔥 HEARTBEAT: mark active session as alive
-await WorkSession.updateMany(
-  {
-    user: req.user._id,
-    status: "active",
-    currentStart: { $ne: null }   // ✅ ONLY RUNNING SESSION
-  },
-  {
-    $set: { lastHeartbeatAt: new Date() }
-  }
-);
-
-
- const { from, to } = req.query;
+  const { from, to } = req.query;
   const q = { user: req.user._id };
+
   if (from || to) {
     q.date = {};
     if (from) q.date.$gte = from;
     if (to) q.date.$lte = to;
   } else {
-    // ⬅ default to “today” only when no range passed
     q.date = ymd(new Date());
   }
 
@@ -233,27 +221,25 @@ await WorkSession.updateMany(
 
   const data = rows.map((s) => {
     let total = s.accumulatedMinutes ?? 0;
+
     if (s.status === "active" && s.currentStart) {
       total += (Date.now() - new Date(s.currentStart)) / 60000;
     }
+
     return {
       _id: s._id,
       date: s.date,
       status: s.status,
       projectId: s.project?._id || null,
       projectName: s.project?.name || s.customTask || "(Custom Task)",
-
-
       companyName: s.project?.company?.name || "—",
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
       accumulatedMinutes: s.accumulatedMinutes ?? 0,
-      // totalMinutes: round2(total),
-      
-    totalMinutes: round2(s.accumulatedMinutes ?? 0),
- segments: s.segments || [],  
+      totalMinutes: round2(total),
+      segments: s.segments || [],
       remarks: s.remarks || "",
-        taskType: s.taskType || null,  
+      taskType: s.taskType || null,
       machineId: s.machineId || null,
       machineInfo: s.machineInfo || null,
       createdAt: s.createdAt,
@@ -277,7 +263,7 @@ router.post("/heartbeat", requireAuth, async (req, res) => {
 /* ----------------------------- ADMIN LIST ---------------------------------- */
 
 router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) => {
-  const { date, from, to, company, category, project, user, machine, taskType  } = req.query;
+  const { date, from, to, company, category, project, user, machine, taskType } = req.query;
 
   const q = {};
   if (date) q.date = date;
@@ -306,46 +292,46 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   if (machine) {
     q.machineId = machine;
   }
-    // ⬇ NEW: filter by work type if provided and valid
+  // ⬇ NEW: filter by work type if provided and valid
   if (taskType && WORK_TYPES.includes(taskType)) {
     q.taskType = taskType;
   }
 
   // -------------------------------------------------------------
-// Load Manual Remarks for matching date range + user
-// -------------------------------------------------------------
-// -------------------------------------------------------------
-// Load Manual Remarks for matching date + user
-// -------------------------------------------------------------
-const remarkQuery = {};
+  // Load Manual Remarks for matching date range + user
+  // -------------------------------------------------------------
+  // -------------------------------------------------------------
+  // Load Manual Remarks for matching date + user
+  // -------------------------------------------------------------
+  const remarkQuery = {};
 
-// Case 1: Admin selects a single date
-if (date) {
-  remarkQuery.date = date;
-}
+  // Case 1: Admin selects a single date
+  if (date) {
+    remarkQuery.date = date;
+  }
 
-// Case 2: Admin selects a date range
-if (from || to) {
-  remarkQuery.date = {};
-  if (from) remarkQuery.date.$gte = from;
-  if (to) remarkQuery.date.$lte = to;
-}
+  // Case 2: Admin selects a date range
+  if (from || to) {
+    remarkQuery.date = {};
+    if (from) remarkQuery.date.$gte = from;
+    if (to) remarkQuery.date.$lte = to;
+  }
 
-// If admin filters by user
-if (q.user) {
-  remarkQuery.user = q.user;
-}
+  // If admin filters by user
+  if (q.user) {
+    remarkQuery.user = q.user;
+  }
 
-// Fetch matching remarks
-const allRemarks = await ManualRemark.find(remarkQuery).lean();
+  // Fetch matching remarks
+  const allRemarks = await ManualRemark.find(remarkQuery).lean();
 
-// Map remarks by "date|userId"
-const remarkMap = new Map();
-for (const r of allRemarks) {
-  const key = `${r.date}|${r.user.toString()}`;
-  if (!remarkMap.has(key)) remarkMap.set(key, []);
-  remarkMap.get(key).push(r.text);
-}
+  // Map remarks by "date|userId"
+  const remarkMap = new Map();
+  for (const r of allRemarks) {
+    const key = `${r.date}|${r.user.toString()}`;
+    if (!remarkMap.has(key)) remarkMap.set(key, []);
+    remarkMap.get(key).push(r.text);
+  }
 
 
 
@@ -383,13 +369,13 @@ for (const r of allRemarks) {
       userEmail: s.user?.email || "",
 
       projectId: s.project?._id || null,
-     projectName: s.project?.name || s.customTask || "(No project)",
+      projectName: s.project?.name || s.customTask || "(No project)",
 
       companyId: s.project?.company?._id || null,
       companyName: s.project?.company?.name || "—",
       categoryId: s.project?.category?._id || null,
       categoryName: s.project?.category?.name || "—",
-        taskType: s.taskType || null,  
+      taskType: s.taskType || null,
 
       // expose machine in admin payload
       machineId: s.machineId || null,
@@ -406,7 +392,7 @@ for (const r of allRemarks) {
         &unit=hours|minutes              // default: minutes
 ------------------------------------------------------------------------------------ */
 router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
-  const { date, from, to, company, category, project, user, machine,taskType, group = "compact", unit = "minutes" } = req.query;
+  const { date, from, to, company, category, project, user, machine, taskType, group = "compact", unit = "minutes" } = req.query;
 
   const useHours = String(unit).toLowerCase() === "hours";
   const round2 = (n) => Math.round(n * 100) / 100;
@@ -447,7 +433,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
 
   // machine filter
   if (machine) q.machineId = machine;
-    // work type filter
+  // work type filter
   if (taskType && WORK_TYPES.includes(taskType)) {
     q.taskType = taskType;
   }
@@ -458,19 +444,19 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
     company && isValidObjectId(company)
       ? { _id: new mongoose.Types.ObjectId(company) }
       : company
-      ? (await (async () => {
+        ? (await (async () => {
           return res.status(400).json({ error: "company must be a valid ObjectId" });
         })())
-      : {};
+        : {};
 
   const categoryMatch =
     category && isValidObjectId(category)
       ? { _id: new mongoose.Types.ObjectId(category) }
       : category
-      ? (await (async () => {
+        ? (await (async () => {
           return res.status(400).json({ error: "category must be a valid ObjectId" });
         })())
-      : {};
+        : {};
 
   // ---- Query sessions + populate ----
   const rows = await WorkSession.find(q)
@@ -508,10 +494,10 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
   const fmt12 = (dt) =>
     dt
       ? new Date(dt).toLocaleTimeString(undefined, {
-          hour: "numeric",
-          minute: "2-digit",
-          hour12: true,
-        })
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      })
       : "";
 
   const esc = (val) => {
@@ -531,7 +517,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
       "Category",
       "Project",
       "Status",
-       "TaskType", 
+      "TaskType",
       totalHeader,
       "SessionsCount",
       "Segments",
@@ -554,9 +540,9 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-       Project: s.project?.name || s.customTask || "(Custom Task)",
-         Status: s.status,
-         TaskType: s.taskType || "",  
+        Project: s.project?.name || s.customTask || "(Custom Task)",
+        Status: s.status,
+        TaskType: s.taskType || "",
         [totalHeader]: total,
         SessionsCount: 1,
         Segments: segmentsPretty,
@@ -594,7 +580,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-       Project: s.project?.name || s.customTask || "(Custom Task)",
+        Project: s.project?.name || s.customTask || "(Custom Task)",
 
         TotalMinutes: 0,
         SessionsCount: 0,
