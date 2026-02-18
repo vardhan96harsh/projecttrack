@@ -14,16 +14,15 @@ const router = express.Router();
 // Get logged-in user's remarks
 router.get("/", requireAuth, async (req, res) => {
   const list = await ManualRemark.find({ user: req.user._id })
+   .populate("project", "name") 
     .sort({ createdAt: -1 })
     .lean();
 
   res.json(list);
 });
 
-// Create remark
-// Create remark + time request
 router.post("/", requireAuth, async (req, res) => {
-  const { text, requestedMinutes } = req.body;
+  const { text, requestedMinutes, project, taskType, customTask } = req.body;
 
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "Remark text cannot be empty" });
@@ -33,18 +32,31 @@ router.post("/", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Requested time is required" });
   }
 
+  if (!project && !customTask) {
+    return res.status(400).json({ error: "Select project OR enter custom task" });
+  }
+
   const today = new Date().toISOString().slice(0, 10);
 
-  const remark = await ManualRemark.create({
+  const created = await ManualRemark.create({
     user: req.user._id,
     text: text.trim(),
     requestedMinutes: Number(requestedMinutes),
+    project: project || null,
+    taskType: taskType || "Alpha",
+    customTask: customTask || null,
     status: "pending",
     date: today,
   });
 
+  // ✅ RETURN POPULATED RECORD
+  const remark = await ManualRemark.findById(created._id)
+    .populate("project", "name")
+    .lean();
+
   res.json(remark);
 });
+
 
 
 // Update remark
@@ -118,6 +130,7 @@ router.get("/admin", requireAuth, async (req, res) => {
 
   const remarks = await ManualRemark.find(query)
     .populate("user", "name email")
+    .populate("project", "name") 
     .sort({ createdAt: -1 })
     .lean();
 
@@ -132,6 +145,10 @@ router.get("/admin", requireAuth, async (req, res) => {
       status: r.status,
       date: r.date,
       createdAt: r.createdAt,
+       projectId: r.project?._id || null,
+    projectName: r.project?.name || null,
+    taskType: r.taskType || null,
+    customTask: r.customTask || null,
     }))
   );
 });
@@ -174,64 +191,98 @@ router.put(
 
 
 // APPROVE manual time request
-router.post(
-  "/:id/approve",
-  requireAuth,
-  async (req, res) => {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin only" });
-    }
+router.post("/:id/approve", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin only" });
+  }
 
-    const remark = await ManualRemark.findById(req.params.id);
-    if (!remark || remark.status !== "pending") {
-      return res.status(404).json({ error: "Invalid request" });
-    }
+  const remark = await ManualRemark.findOneAndUpdate(
+    { _id: req.params.id, status: "pending" },
+    { status: "approved", reviewedBy: req.user._id, reviewedAt: new Date() },
+    { new: true }
+  );
 
-    // find stopped session for that date
-    let session = await WorkSession.findOne({
+  if (!remark) {
+    return res.status(404).json({ error: "Invalid request" });
+  }
+
+  let session;
+
+  // =========================
+  // PROJECT SESSION
+  // =========================
+  if (remark.project) {
+    session = await WorkSession.findOne({
       user: remark.user,
       date: remark.date,
-      status: "stopped",
+      project: remark.project,
     });
 
     if (!session) {
       session = await WorkSession.create({
         user: remark.user,
         date: remark.date,
+        project: remark.project,
+        taskType: remark.taskType,
         status: "stopped",
         accumulatedMinutes: 0,
         segments: [],
       });
     }
+  }
 
-    // ✅ ADD TIME
-    session.accumulatedMinutes += remark.requestedMinutes;
+  // =========================
+  // GENERAL SESSION
+  // =========================
+  else {
+    session = await WorkSession.findOne({
+      user: remark.user,
+      date: remark.date,
+      project: null,
+      customTask: remark.customTask,
+    });
 
-  const start = new Date(`${remark.date}T00:00:00`);
-const end = new Date(start.getTime() + remark.requestedMinutes * 60 * 1000);
+    if (!session) {
+      session = await WorkSession.create({
+        user: remark.user,
+        date: remark.date,
+        customTask: remark.customTask,
+        taskType: remark.taskType,
+        status: "stopped",
+        accumulatedMinutes: 0,
+        segments: [],
+      });
+    }
+  }
 
-session.segments.push({
-  start,
-  end,
-  manual: true,
-  source: "manual-remark",
-  remarkText: remark.text,      // 👈 THIS IS KEY
-  remarkId: remark._id,
-  addedBy: "admin",
+  // =========================
+  // ADD TIME
+  // =========================
+  session.accumulatedMinutes += remark.requestedMinutes;
+
+  const lastSegment = session.segments[session.segments.length - 1];
+
+  const start = lastSegment
+    ? new Date(lastSegment.end)
+    : new Date(`${remark.date}T09:00:00`);
+
+  const end = new Date(start.getTime() + remark.requestedMinutes * 60000);
+
+  session.segments.push({
+    start,
+    end,
+    manual: true,
+    source: "manual-remark",
+    remarkId: remark._id,
+    remarkText: remark.text,
+  });
+
+  await session.save();
+
+  res.json({ success: true });
 });
 
 
-    await session.save();
-
-    // mark remark approved
-    remark.status = "approved";
-    remark.reviewedBy = req.user._id;
-    remark.reviewedAt = new Date();
-    await remark.save();
-
-    res.json({ success: true });
-  }
-);
 
 
 router.post(
@@ -255,39 +306,6 @@ router.post(
 // ===============================
 // ADMIN – UPDATE REQUESTED MINUTES
 // ===============================
-router.put(
-  "/:id/update-minutes",
-  requireAuth,
-  async (req, res) => {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin only" });
-    }
 
-    const { requestedMinutes } = req.body;
-
-    if (!requestedMinutes || requestedMinutes <= 0) {
-      return res.status(400).json({ error: "Invalid minutes" });
-    }
-
-    const remark = await ManualRemark.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        status: "pending",
-      },
-      {
-        requestedMinutes: Number(requestedMinutes),
-      },
-      { new: true }
-    );
-
-    if (!remark) {
-      return res
-        .status(400)
-        .json({ error: "Cannot edit after approval/rejection" });
-    }
-
-    res.json(remark);
-  }
-);
 
 export default router;

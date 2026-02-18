@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+
 const manualRemarkSchema = new mongoose.Schema(
   {
     user: {
@@ -9,20 +10,17 @@ const manualRemarkSchema = new mongoose.Schema(
 
     text: { type: String, required: true },
 
-    // ⏱️ Requested time
     requestedMinutes: {
       type: Number,
-      required: true, // total minutes (hours * 60 + minutes)
+      required: true,
     },
 
-    // ✅ Approval workflow
     status: {
       type: String,
       enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
 
-    // Admin info
     reviewedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -30,10 +28,40 @@ const manualRemarkSchema = new mongoose.Schema(
 
     reviewedAt: Date,
 
-    date: { type: String, required: true }, // YYYY-MM-DD
+    date: { type: String, required: true },
+
+    // 🔹 PROJECT CONTEXT
+    project: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Project",
+      default: null,
+    },
+
+    // 🔹 NEW: work type like WorkTimer
+    taskType: {
+      type: String,
+      enum: [
+        "Alpha",
+        "Beta",
+        "CR",
+        "Rework",
+        "poc",
+        "Analysis",
+        "Storyboard QA",
+        "Output QA",
+      ],
+      default: "Alpha",
+    },
+
+    // 🔹 NEW: custom task (general request)
+    customTask: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
+manualRemarkSchema.index({ user: 1, date: 1 });
 
 export default mongoose.model("ManualRemark", manualRemarkSchema);

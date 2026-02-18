@@ -1,7 +1,15 @@
 // backend/models/WorkSession.js
 import mongoose from "mongoose";
 
-const segmentSchema = new mongoose.Schema({ start: Date, end: Date });
+const segmentSchema = new mongoose.Schema({
+  start: Date,
+  end: Date,
+  manual: { type: Boolean, default: false },
+  source: String,
+  remarkId: mongoose.Schema.Types.ObjectId,
+  remarkText: String,
+});
+
 
 const workSessionSchema = new mongoose.Schema(
   {
