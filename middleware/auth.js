@@ -1,31 +1,46 @@
 import jwt from "jsonwebtoken";
-import User from "../models/User.js"; // ✅ Add this line
+import User from "../models/User.js";
 
-// ✅ This middleware verifies token and attaches full user data
 export const requireAuth = async (req, res, next) => {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Missing token" });
 
+  if (!token) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+
+  let payload;
   try {
-    // verify token (use the same secret you used when generating the token)
-    const payload = jwt.verify(token, process.env.JWT_SECRET || "dev");
-
-    // ✅ Fetch the full user from DB (not just ID from token)
-    // If your token has { id: user._id }, use payload.id
-    // If your token has { userId: user._id }, change to payload.userId
-    const user = await User.findById(payload.id).select("_id name email role");
-    if (!user) return res.status(401).json({ error: "User not found" });
-
-    req.user = user; // ✅ attach user object to the request
-    next();
+    payload = jwt.verify(token, process.env.JWT_SECRET || "dev");
   } catch (e) {
-    console.error("Auth error:", e);
+    console.error("JWT verify error:", e.message);
+
+    // 🔵 Give clearer reason
+    if (e.name === "TokenExpiredError") {
+      return res.status(401).json({ error: "Token expired" });
+    }
+
     return res.status(401).json({ error: "Invalid token" });
   }
+
+  // 🔵 Try DB lookup, but don't fail if DB hiccups
+  let user = null;
+  try {
+    user = await User.findById(payload.id).select("_id name email role");
+  } catch (err) {
+    console.error("DB lookup failed:", err.message);
+  }
+
+  // 🔵 Always attach safe user object
+  req.user = user || {
+    _id: payload.id,
+    role: payload.role || "employee",
+    name: payload.name || "User",
+  };
+
+  next();
 };
 
-// ✅ Check if the logged-in user has the required role (admin, employee, etc.)
 export const requireRole = (role) => (req, res, next) => {
   if (!req.user || req.user.role !== role) {
     return res.status(403).json({ error: "Forbidden" });
