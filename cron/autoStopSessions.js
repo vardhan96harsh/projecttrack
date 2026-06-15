@@ -13,7 +13,7 @@ export async function autoStopAbandonedSessions() {
   });
 
   for (const s of sessions) {
-    const endTime = new Date();
+const endTime = s.lastHeartbeatAt || new Date();
 
     s.segments.push({ start: s.currentStart, end: endTime });
 
@@ -22,11 +22,10 @@ export async function autoStopAbandonedSessions() {
       (s.accumulatedMinutes || 0) + Math.max(0, minutes);
 
     s.currentStart = null;
-    s.status = "stopped";
-
-    s.remarks = s.remarks
-      ? `${s.remarks} | Auto-stopped (no heartbeat)`
-      : "Auto-stopped (no heartbeat)";
+   s.status = "paused"; // idle → pause, not stop
+s.remarks = s.remarks
+  ? `${s.remarks} | Auto-paused (no heartbeat)`
+  : "Auto-paused (no heartbeat)";
 
     await s.save();
   }

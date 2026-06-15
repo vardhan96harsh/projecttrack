@@ -23,6 +23,10 @@ const userSchema = new mongoose.Schema({
     enum: ["Male", "Female"],
     default: null
   },
+  dob: {
+  type: Date,
+  default: null,
+},
 
   // ✅ NEW FIELD
   designation: {

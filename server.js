@@ -1,3 +1,5 @@
+import dns from 'dns';
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 import express from "express";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
@@ -14,6 +16,7 @@ import machinesRouter from "./routes/machines.js";
 import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
 import { autoStopAbandonedSessions } from "./cron/autoStopSessions.js";
+import holidayRoutes from "./routes/holidays.js";
 
 dotenv.config();
 
@@ -52,6 +55,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/machines", machinesRouter);
 app.use("/api/work-sessions", workSessionsRouter);
 app.use("/api/manual-remarks", manualRemarkRoutes);
+app.use("/api/holidays", holidayRoutes);
 
 const PORT = process.env.PORT || 3001;
 const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";

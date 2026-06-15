@@ -252,11 +252,23 @@ router.get("/my", requireAuth, async (req, res) => {
 
 // 🔥 HEARTBEAT – keep active session alive
 router.post("/heartbeat", requireAuth, async (req, res) => {
-  await WorkSession.updateOne(
-    { user: req.user._id, status: "active" },
-    { $set: { lastHeartbeatAt: new Date() } }
+  const result = await WorkSession.updateOne(
+    {
+      user: req.user._id,
+      status: "active",
+      currentStart: { $ne: null },
+    },
+    {
+      $set: {
+        lastHeartbeatAt: new Date(),
+      },
+    }
   );
-  res.json({ ok: true });
+
+  res.json({
+    ok: true,
+    updated: result.modifiedCount || 0,
+  });
 });
 
 

@@ -14,8 +14,10 @@ router.get("/", requireAuth, requireRole("admin"), async (req, res) => {
     email: u.email,
     role: u.role,
     status: u.status,
-    gender: u.gender,          // ✅ ADDED
-    designation: u.designation // ✅ ADDED
+    gender: u.gender,
+    designation: u.designation,
+    dob: u.dob
+
   })));
 
 });
@@ -27,8 +29,9 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
     password,
     role = "employee",
     status = "active",
-    gender,        // ✅ ADDED
-    designation    // ✅ ADDED
+    gender,
+    designation,
+    dob
   } = req.body;
 
   if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
@@ -39,32 +42,38 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
     passwordHash: hash,
     role,
     status,
-    gender,        // ✅ ADDED
-    designation    // ✅ ADDED
+    gender: gender || null,
+    designation: designation || null,
+    dob: dob ? new Date(dob) : null
   });
 
-  res.status(201).json({ id: created._id, name: created.name, email: created.email, role: created.role, status: created.status,
-  gender: created.gender,
-  designation: created.designation });
+  res.status(201).json({
+    id: created._id, name: created.name, email: created.email, role: created.role, status: created.status,
+    gender: created.gender,
+    designation: created.designation, dob: created.dob
+  });
 });
 
 router.put("/:id", requireAuth, requireRole("admin"), async (req, res) => {
-  const { name, email, role, status, password, gender, designation } = req.body;
+  const { name, email, role, status, password, gender, designation, dob } = req.body;
 
   const update = {
     name,
     email,
     role,
     status,
-    gender,        // ✅ ADDED
-    designation    // ✅ ADDED
+    gender: gender || null,
+    designation: designation || null,
+    dob: dob ? new Date(dob) : null
   };
 
   if (password) update.passwordHash = await bcrypt.hash(password, 10);
-  const updated = await User.findByIdAndUpdate(req.params.id, update,  { new: true, runValidators: true });
-  res.json({ id: updated._id, name: updated.name, email: updated.email, role: updated.role, status: updated.status,
-  gender: updated.gender,
-  designation: updated.designation });
+  const updated = await User.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true });
+  res.json({
+    id: updated._id, name: updated.name, email: updated.email, role: updated.role, status: updated.status,
+    gender: updated.gender,
+    designation: updated.designation, dob: updated.dob
+  });
 });
 
 // router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
@@ -84,4 +93,26 @@ router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
   res.json({ message: "User deleted successfully" });
 });
 
+
+router.get("/birthdays/today", requireAuth, async (req, res) => {
+  const users = await User.find({
+    status: "active",
+    dob: { $ne: null }
+  }).select("name dob");
+
+  const today = new Date();
+  const month = today.getMonth();
+  const day = today.getDate();
+
+  const birthdays = users.filter(u => {
+    const d = new Date(u.dob);
+    return d.getMonth() === month && d.getDate() === day;
+  });
+
+  res.json(birthdays.map(u => ({
+    id: u._id,
+    name: u.name,
+    dob: u.dob
+  })));
+});
 export default router;

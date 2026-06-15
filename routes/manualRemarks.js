@@ -154,41 +154,96 @@ router.get("/admin", requireAuth, async (req, res) => {
 });
 
 // UPDATE requested minutes (ADMIN – before approval)
-router.put(
-  "/:id/update-minutes",
-  requireAuth,
-  async (req, res) => {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin only" });
-    }
+// router.put(
+//   "/:id/update-minutes",
+//   requireAuth,
+//   async (req, res) => {
+//     if (req.user.role !== "admin") {
+//       return res.status(403).json({ error: "Admin only" });
+//     }
 
-    const { requestedMinutes } = req.body;
+//     const { requestedMinutes } = req.body;
 
-    if (!requestedMinutes || requestedMinutes <= 0) {
-      return res.status(400).json({ error: "Invalid minutes" });
-    }
+//     if (!requestedMinutes || requestedMinutes <= 0) {
+//       return res.status(400).json({ error: "Invalid minutes" });
+//     }
 
-    const remark = await ManualRemark.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        status: "pending", // 🔒 ONLY before approval
-      },
-      {
-        requestedMinutes: Number(requestedMinutes),
-      },
-      { new: true }
-    );
+//     const remark = await ManualRemark.findOneAndUpdate(
+//       {
+//         _id: req.params.id,
+//         status: "pending", // 🔒 ONLY before approval
+//       },
+//       {
+//         requestedMinutes: Number(requestedMinutes),
+//       },
+//       { new: true }
+//     );
 
-    if (!remark) {
-      return res
-        .status(400)
-        .json({ error: "Cannot edit after approval/rejection" });
-    }
+//     if (!remark) {
+//       return res
+//         .status(400)
+//         .json({ error: "Cannot edit after approval/rejection" });
+//     }
 
-    res.json(remark);
+//     res.json(remark);
+//   }
+// );
+// UPDATE requested minutes (ADMIN – pending OR approved)
+router.put("/:id/update-minutes", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin only" });
   }
-);
 
+  const { requestedMinutes } = req.body;
+
+  if (!requestedMinutes || requestedMinutes <= 0) {
+    return res.status(400).json({ error: "Invalid minutes" });
+  }
+
+  const remark = await ManualRemark.findById(req.params.id);
+
+  if (!remark) {
+    return res.status(404).json({ error: "Remark not found" });
+  }
+
+  if (remark.status === "rejected") {
+    return res.status(400).json({ error: "Cannot edit rejected request" });
+  }
+
+  const newMinutes = Number(requestedMinutes);
+
+  // 🔥 If approved → update WorkSession also
+  if (remark.status === "approved") {
+    const session = await WorkSession.findOne({
+      "segments.remarkId": remark._id,
+    });
+
+    if (session) {
+      const seg = session.segments.find(
+        (s) => String(s.remarkId) === String(remark._id)
+      );
+
+      if (seg) {
+        const oldSegmentMinutes =
+          (new Date(seg.end) - new Date(seg.start)) / 60000;
+
+        session.accumulatedMinutes =
+          session.accumulatedMinutes - oldSegmentMinutes + newMinutes;
+
+        seg.end = new Date(
+          new Date(seg.start).getTime() + newMinutes * 60000
+        );
+
+        await session.save();
+      }
+    }
+  }
+
+  remark.requestedMinutes = newMinutes;
+  await remark.save();
+
+  res.json(remark);
+});
 
 // APPROVE manual time request
 router.post("/:id/approve", requireAuth, async (req, res) => {
