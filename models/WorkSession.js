@@ -14,7 +14,9 @@ const segmentSchema = new mongoose.Schema({
 const workSessionSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-   project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", default: null },
+    project: { type: mongoose.Schema.Types.ObjectId, ref: "Project", default: null },
+    task: { type: mongoose.Schema.Types.ObjectId, ref: "Task", default: null },
+    taskTitle: { type: String, default: null },
 
     date: String, // YYYY-MM-DD
     status: { type: String, enum: ["active", "paused", "stopped"], default: "active" },
@@ -23,7 +25,7 @@ const workSessionSchema = new mongoose.Schema(
     currentStart: Date,
     remarks: String,
     customTask: { type: String, default: null },
-        // 🔹 Work type for this session
+    // 🔹 Work type for this session
     taskType: {
       type: String,
       enum: ["Alpha", "Beta", "CR", "Rework", "poc","Analysis","Storyboard QA","Output QA"],

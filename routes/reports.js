@@ -3,15 +3,27 @@ import Timesheet from "../models/Timesheet.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 
 const router = express.Router();
+
+function parseDateRange(from, to) {
+  const range = {};
+  if (from) range.$gte = new Date(from);
+  if (to) {
+    const toDate = new Date(to);
+    if (typeof to === "string" && to.length <= 10) {
+      toDate.setUTCHours(23, 59, 59, 999);
+    }
+    range.$lte = toDate;
+  }
+  return range;
+}
+
 router.get("/summary", requireAuth, requireRole("admin"), async (req, res) => {
   try {
     const { dim = "project", from, to } = req.query;
 
     const match = {};
     if (from || to) {
-      match.dateLogged = {};
-      if (from) match.dateLogged.$gte = new Date(from);
-      if (to) match.dateLogged.$lte = new Date(to);
+      match.dateLogged = parseDateRange(from, to);
     }
 
     // which collection to look up + label field (+ extra)
@@ -107,9 +119,7 @@ router.get(
 
       const match = { user };
       if (from || to) {
-        match.dateLogged = {};
-        if (from) match.dateLogged.$gte = new Date(from);
-        if (to) match.dateLogged.$lte = new Date(to);
+        match.dateLogged = parseDateRange(from, to);
       }
 
       const pipeline = [
@@ -183,9 +193,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
   if (project) q.project = project;
   if (taskType) q.taskType = taskType;
   if (from || to) {
-    q.dateLogged = {};
-    if (from) q.dateLogged.$gte = new Date(from);
-    if (to) q.dateLogged.$lte = new Date(to);
+    q.dateLogged = parseDateRange(from, to);
   }
 
   const items = await Timesheet.find(q)

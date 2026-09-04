@@ -16,7 +16,8 @@ router.get("/", requireAuth, async (req, res) => {
     const items = await Project.find(q)
       .populate("company")
       .populate("category")
-      .sort({ createdAt: -1 });
+      .collation({ locale: "en", strength: 2 })
+      .sort({ name: 1 });
 
     res.json(items);
   } catch (err) {

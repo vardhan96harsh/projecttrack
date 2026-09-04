@@ -103,6 +103,19 @@ router.delete("/:id", requireAuth, async (req, res) => {
 /* =====================================================
    ADMIN ROUTE (ALL USERS)
    ===================================================== */
+router.get("/admin/pending-count", requireAuth, async (req, res) => {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Access denied" });
+  }
+  try {
+    const count = await ManualRemark.countDocuments({ status: "pending" });
+    res.json({ count });
+  } catch (err) {
+    console.error("PENDING COUNT ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch pending count", count: 0 });
+  }
+});
+
 router.get("/admin", requireAuth, async (req, res) => {
   if (req.user.role !== "admin") {
     return res.status(403).json({ error: "Access denied" });
@@ -278,11 +291,14 @@ router.post("/:id/approve", requireAuth, async (req, res) => {
         user: remark.user,
         date: remark.date,
         project: remark.project,
+        taskTitle: remark.text || null,
         taskType: remark.taskType,
         status: "stopped",
         accumulatedMinutes: 0,
         segments: [],
       });
+    } else if (!session.taskTitle && remark.text) {
+      session.taskTitle = remark.text;
     }
   }
 
@@ -302,11 +318,14 @@ router.post("/:id/approve", requireAuth, async (req, res) => {
         user: remark.user,
         date: remark.date,
         customTask: remark.customTask,
+        taskTitle: remark.customTask || remark.text || null,
         taskType: remark.taskType,
         status: "stopped",
         accumulatedMinutes: 0,
         segments: [],
       });
+    } else if (!session.taskTitle && (remark.customTask || remark.text)) {
+      session.taskTitle = remark.customTask || remark.text;
     }
   }
 

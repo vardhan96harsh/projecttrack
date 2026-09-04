@@ -16,23 +16,36 @@ import machinesRouter from "./routes/machines.js";
 import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
 import { autoStopAbandonedSessions } from "./cron/autoStopSessions.js";
+import taskRoutes from "./routes/tasks.js";
+import projectPlanRoutes from "./routes/projectPlans.js";
 import holidayRoutes from "./routes/holidays.js";
 
 dotenv.config();
 
 const app = express();
 
-// CORS (local + Render)
+// CORS (local + desktop + production)
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173",
-      "http://localhost:5174",
-      "http://localhost:5175",
-      "http://127.0.0.1:5175",
-      /\.onrender\.com$/, // matches https://*.onrender.com
-    ],
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    origin: (origin, callback) => {
+      // Allow requests with no origin (Electron file://, mobile apps, curl, etc.)
+      if (!origin || origin === "null" || origin === "file://" || origin.startsWith("file://")) {
+        return callback(null, true);
+      }
+      const allowedPatterns = [
+        /^http:\/\/localhost(:\d+)?$/,
+        /^http:\/\/127\.0\.0\.1(:\d+)?$/,
+        /\.onrender\.com$/,
+        /^http:\/\/13\.201\.46\.13(:\d+)?$/,
+      ];
+      const isAllowed = allowedPatterns.some((pattern) => pattern.test(origin));
+      if (isAllowed) {
+        return callback(null, true);
+      }
+      // Fallback allow in production to prevent desktop app blockages
+      return callback(null, true);
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   })
@@ -56,6 +69,8 @@ app.use("/api/machines", machinesRouter);
 app.use("/api/work-sessions", workSessionsRouter);
 app.use("/api/manual-remarks", manualRemarkRoutes);
 app.use("/api/holidays", holidayRoutes);
+app.use("/api/tasks", taskRoutes);
+app.use("/api/project-plans", projectPlanRoutes);
 
 const PORT = process.env.PORT || 3001;
 const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";

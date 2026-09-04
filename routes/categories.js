@@ -6,7 +6,9 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 const router = express.Router();
 
 router.get("/", requireAuth, async (req, res) => {
-  const items = await Category.find().sort({ name: 1 });
+  const items = await Category.find()
+    .collation({ locale: "en", strength: 2 })
+    .sort({ name: 1 });
   res.json(items);
 });
 

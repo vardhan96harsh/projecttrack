@@ -2,6 +2,7 @@ import express from "express";
 import mongoose from "mongoose";
 import WorkSession from "../models/WorkSession.js";
 import Project from "../models/Project.js";
+import Task from "../models/Task.js";
 import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import ManualRemark from "../models/ManualRemark.js";
@@ -25,10 +26,11 @@ router.get("/work-types", requireAuth, async (req, res) => {
 });
 
 // POST /api/work-sessions/start
-// POST /api/work-sessions/start
 router.post("/start", requireAuth, async (req, res) => {
   const {
     projectId,
+    taskId,
+    taskTitle,
     customTask,
     remarks = "",
     machineId,
@@ -37,14 +39,12 @@ router.post("/start", requireAuth, async (req, res) => {
     workType,
   } = req.body || {};
 
-  // allow custom task if no project is selected
-  if (!projectId && !customTask) {
+  // allow custom task or task or project
+  if (!projectId && !taskId && !customTask) {
     return res.status(400).json({
-      error: "Either projectId or customTask is required.",
+      error: "Either projectId, taskId, or customTask is required.",
     });
   }
-
-
 
   const requestedType = taskType || workType;
   const chosenType = WORK_TYPES.includes(requestedType)
@@ -53,29 +53,51 @@ router.post("/start", requireAuth, async (req, res) => {
 
   const todayStr = ymd(new Date());
 
-
-
-
-
   // 🔹 1) Auto-stop any old active sessions from previous days
+  try {
+    const staleSessions = await WorkSession.find({
+      user: req.user._id,
+      status: "active",
+      date: { $ne: todayStr },
+    });
 
-  // 🔹 2) Now only look for active *today*
-  const existing = await WorkSession.findOne({
+    const now = new Date();
+    for (const s of staleSessions) {
+      const end = s.lastHeartbeatAt || now;
+      if (s.currentStart) {
+        s.segments.push({ start: s.currentStart, end });
+        const ms = end.getTime() - new Date(s.currentStart).getTime();
+        s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        s.currentStart = null;
+      }
+      s.status = "stopped";
+      s.remarks = s.remarks ? `${s.remarks} | Auto-closed on new day` : "Auto-closed on new day";
+      await s.save();
+    }
+  } catch (err) {
+    console.warn("Could not clean stale sessions:", err.message);
+  }
+
+  // 🔹 2) Check if user ALREADY has an active session right now
+  const existingActive = await WorkSession.findOne({
     user: req.user._id,
     status: "active",
     date: todayStr,
-  });
-
-  if (existing) {
-    console.log("⛔ /start – active session already exists for today:", existing._id);
-    return res
-      .status(400)
-      .json({ error: "An active session already exists for today." });
-  }
+  }).sort({ createdAt: -1 });
 
   let project = null;
+  let taskDoc = null;
 
-  if (projectId) {
+  if (taskId && isValidObjectId(taskId)) {
+    taskDoc = await Task.findById(taskId);
+    if (taskDoc && taskDoc.project) {
+      project = await Project.findById(taskDoc.project)
+        .select("_id name")
+        .populate("company category", "name");
+    }
+  }
+
+  if (!project && projectId && isValidObjectId(projectId)) {
     project = await Project.findById(projectId)
       .select("_id name")
       .populate("company category", "name");
@@ -85,18 +107,89 @@ router.post("/start", requireAuth, async (req, res) => {
     }
   }
 
+  const finalTaskTitle = taskDoc ? taskDoc.title : (taskTitle || (project ? null : customTask) || null);
 
+  if (existingActive) {
+    const isSameProject = String(existingActive.project || "") === String(project ? project._id : "");
+    const isSameTask = String(existingActive.task || "") === String(taskDoc ? taskDoc._id : "");
+    const isSameCustom = (existingActive.customTask || "") === (project ? "" : (customTask || ""));
+    const isSameType = (existingActive.taskType || "") === chosenType;
 
+    // If it's already the exact same task running, just return it
+    if (isSameProject && isSameTask && isSameCustom && isSameType) {
+      return res.json({
+        ...existingActive.toObject(),
+        projectId: project ? project._id : null,
+        projectName: project ? project.name : (customTask ? "(Custom Task)" : "—"),
+        taskId: taskDoc ? taskDoc._id : null,
+        taskTitle: finalTaskTitle,
+        customTask: existingActive.customTask || null,
+        companyName: project?.company?.name || "—",
+        categoryName: project?.category?.name || "—",
+        totalMinutes: round2(existingActive.accumulatedMinutes || 0),
+      });
+    }
+
+    // Otherwise, auto-pause the previous active session so user can switch seamlessly!
+    const now = new Date();
+    if (existingActive.currentStart) {
+      existingActive.segments.push({ start: existingActive.currentStart, end: now });
+      const ms = now - new Date(existingActive.currentStart);
+      existingActive.accumulatedMinutes = (existingActive.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+      existingActive.currentStart = null;
+    }
+    existingActive.status = "paused";
+    await existingActive.save();
+    console.log("⏸️ Auto-paused previous session to switch:", existingActive._id);
+  }
+
+  // 🔹 3) Check if user has an existing PAUSED session for this EXACT project/task today:
+  // If so, resume that session so time seamlessly accumulates!
+  const matchingPaused = await WorkSession.findOne({
+    user: req.user._id,
+    project: project ? project._id : null,
+    task: taskDoc ? taskDoc._id : null,
+    customTask: project ? null : (customTask || null),
+    date: todayStr,
+    status: "paused",
+  }).sort({ createdAt: -1 });
+
+  if (matchingPaused) {
+    matchingPaused.status = "active";
+    matchingPaused.currentStart = new Date();
+    matchingPaused.lastHeartbeatAt = new Date();
+    matchingPaused.taskType = chosenType;
+    if (machineId) matchingPaused.machineId = machineId;
+    if (machineInfo) matchingPaused.machineInfo = machineInfo;
+    await matchingPaused.save();
+    console.log("▶️ Resumed existing paused session for this project/task:", matchingPaused._id);
+
+    return res.json({
+      ...matchingPaused.toObject(),
+      projectId: project ? project._id : null,
+      projectName: project ? project.name : (customTask ? "(Custom Task)" : "—"),
+      taskId: taskDoc ? taskDoc._id : null,
+      taskTitle: finalTaskTitle,
+      customTask: matchingPaused.customTask || null,
+      companyName: project?.company?.name || "—",
+      categoryName: project?.category?.name || "—",
+      totalMinutes: round2(matchingPaused.accumulatedMinutes || 0),
+    });
+  }
+
+  // 🔹 4) Create a new active session
   const session = await WorkSession.create({
     user: req.user._id,
     project: project ? project._id : null,
+    task: taskDoc ? taskDoc._id : null,
+    taskTitle: finalTaskTitle,
 
     date: todayStr,
     status: "active",
     segments: [],
     accumulatedMinutes: 0,
     currentStart: new Date(),
-     lastHeartbeatAt: new Date(),  
+    lastHeartbeatAt: new Date(),
     remarks,
     customTask: project ? null : (customTask || null),
 
@@ -105,25 +198,25 @@ router.post("/start", requireAuth, async (req, res) => {
     machineInfo: machineInfo || undefined,
   });
 
-  console.log("✅ /start OK – new session", session._id, "taskType =", chosenType);
+  console.log("✅ /start OK – new session", session._id, "taskType =", chosenType, "project =", project?.name, "task =", finalTaskTitle);
 
   res.json({
     ...session.toObject(),
-    projectName: project
-      ? project.name
-      : customTask || "(Custom Task)",
-
-
+    projectId: project ? project._id : null,
+    projectName: project ? project.name : (customTask ? "(Custom Task)" : "—"),
+    taskId: taskDoc ? taskDoc._id : null,
+    taskTitle: finalTaskTitle,
+    customTask: session.customTask || null,
+    companyName: project?.company?.name || "—",
+    categoryName: project?.category?.name || "—",
     totalMinutes: round2(session.accumulatedMinutes || 0),
   });
 });
 
-
-
 // POST /api/work-sessions/pause
 router.post("/pause", requireAuth, async (req, res) => {
   const { machineId, machineInfo } = req.body || {};
-  const session = await WorkSession.findOne({ user: req.user._id, status: "active" });
+  const session = await WorkSession.findOne({ user: req.user._id, status: "active" }).sort({ createdAt: -1 });
   if (!session) return res.status(404).json({ error: "No active session found." });
 
   const now = new Date();
@@ -149,19 +242,52 @@ router.post("/pause", requireAuth, async (req, res) => {
 
 // POST /api/work-sessions/resume
 router.post("/resume", requireAuth, async (req, res) => {
-  const { machineId, machineInfo } = req.body || {};
-  const session = await WorkSession.findOne({ user: req.user._id, status: "paused" });
+  const { machineId, machineInfo, sessionId } = req.body || {};
+  let session = null;
+  if (sessionId && isValidObjectId(sessionId)) {
+    session = await WorkSession.findOne({ _id: sessionId, user: req.user._id });
+  }
+  if (!session) {
+    session = await WorkSession.findOne({ user: req.user._id, status: "paused" }).sort({ updatedAt: -1 });
+  }
   if (!session) return res.status(404).json({ error: "No paused session found." });
+
+  // If there are any other active sessions, auto-pause them
+  const otherActive = await WorkSession.find({ user: req.user._id, status: "active", _id: { $ne: session._id } });
+  const now = new Date();
+  for (const s of otherActive) {
+    if (s.currentStart) {
+      s.segments.push({ start: s.currentStart, end: now });
+      const ms = now - new Date(s.currentStart);
+      s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+      s.currentStart = null;
+    }
+    s.status = "paused";
+    await s.save();
+  }
 
   session.status = "active";
   session.currentStart = new Date();
-   session.lastHeartbeatAt = new Date(); 
+  session.lastHeartbeatAt = new Date(); 
 
   if (machineId) session.machineId = machineId;
   if (machineInfo) session.machineInfo = machineInfo;
 
   await session.save();
-  res.json({ ...session.toObject(), totalMinutes: round2(session.accumulatedMinutes || 0) });
+
+  const project = session.project ? await Project.findById(session.project).select("_id name").populate("company category", "name") : null;
+  const taskDoc = session.task ? await Task.findById(session.task) : null;
+
+  res.json({
+    ...session.toObject(),
+    projectId: project ? project._id : null,
+    projectName: project ? project.name : (session.customTask ? "(Custom Task)" : "—"),
+    taskId: taskDoc ? taskDoc._id : null,
+    taskTitle: session.taskTitle || taskDoc?.title || (session.customTask || null),
+    companyName: project?.company?.name || "—",
+    categoryName: project?.category?.name || "—",
+    totalMinutes: round2(session.accumulatedMinutes || 0),
+  });
 });
 
 // POST /api/work-sessions/stop
@@ -170,7 +296,7 @@ router.post("/stop", requireAuth, async (req, res) => {
   const session = await WorkSession.findOne({
     user: req.user._id,
     status: { $in: ["active", "paused"] },
-  });
+  }).sort({ createdAt: -1 });
   if (!session) return res.status(404).json({ error: "No active/paused session found." });
 
   const now = new Date();
@@ -185,7 +311,9 @@ router.post("/stop", requireAuth, async (req, res) => {
   }
 
   session.status = "stopped";
-  session.remarks = remarks;
+  if (remarks) {
+    session.remarks = session.remarks ? `${session.remarks} | ${remarks}` : remarks;
+  }
 
   if (machineId) session.machineId = machineId;
   if (machineInfo) session.machineInfo = machineInfo;
@@ -216,6 +344,7 @@ router.get("/my", requireAuth, async (req, res) => {
         { path: "category", select: "name" },
       ],
     })
+    .populate("task", "title taskType status")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -231,7 +360,10 @@ router.get("/my", requireAuth, async (req, res) => {
       date: s.date,
       status: s.status,
       projectId: s.project?._id || null,
-      projectName: s.project?.name || s.customTask || "(Custom Task)",
+      projectName: s.project?.name || (s.customTask ? "(Custom Task)" : "—"),
+      taskId: s.task?._id || s.task || null,
+      taskTitle: s.task?.title || s.taskTitle || s.customTask || null,
+      customTask: s.customTask || null,
       companyName: s.project?.company?.name || "—",
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
@@ -271,6 +403,164 @@ router.post("/heartbeat", requireAuth, async (req, res) => {
   });
 });
 
+// 🔥 OFFLINE SYNC – Reconcile offline sessions and segments when reconnected
+router.post("/sync-offline", requireAuth, async (req, res) => {
+  try {
+    const { offlineSession } = req.body || {};
+    if (!offlineSession) {
+      return res.status(400).json({ error: "No offline session provided." });
+    }
+
+    const todayStr = ymd(new Date());
+    const targetDate = offlineSession.date || todayStr;
+
+    let session = null;
+
+    // 1. Try finding existing session by _id
+    if (offlineSession._id && isValidObjectId(offlineSession._id)) {
+      session = await WorkSession.findOne({
+        _id: offlineSession._id,
+        user: req.user._id,
+      });
+    }
+
+    // 2. Fallback: find active or paused session for today with matching project
+    if (!session) {
+      const q = {
+        user: req.user._id,
+        date: targetDate,
+      };
+      if (offlineSession.projectId && isValidObjectId(offlineSession.projectId)) {
+        q.project = offlineSession.projectId;
+      } else if (offlineSession.customTask) {
+        q.customTask = offlineSession.customTask;
+      }
+      session = await WorkSession.findOne(q);
+    }
+
+    // 3. Process segments & calculate accumulated time
+    const inputSegments = Array.isArray(offlineSession.segments) ? offlineSession.segments : [];
+    let totalMs = 0;
+    const cleanSegments = [];
+
+    for (const seg of inputSegments) {
+      if (!seg.start) continue;
+      const s = new Date(seg.start);
+      const e = seg.end ? new Date(seg.end) : null;
+      cleanSegments.push({
+        start: s,
+        end: e,
+        manual: !!seg.manual,
+        source: seg.source || "offline-sync",
+      });
+      if (e && e > s) {
+        totalMs += (e.getTime() - s.getTime());
+      }
+    }
+
+    const targetStatus = ["active", "paused", "stopped"].includes(offlineSession.status)
+      ? offlineSession.status
+      : "paused";
+
+    const calcMinutes = round2(totalMs / 60000);
+
+    if (session) {
+      // Reconcile into existing session
+      session.segments = cleanSegments;
+      session.accumulatedMinutes = Math.max(session.accumulatedMinutes || 0, calcMinutes);
+      session.status = targetStatus;
+      session.currentStart = targetStatus === "active" && offlineSession.currentStart
+        ? new Date(offlineSession.currentStart)
+        : null;
+      session.lastHeartbeatAt = new Date();
+
+      if (offlineSession.remarks) {
+        session.remarks = offlineSession.remarks;
+      }
+      if (offlineSession.machineId) session.machineId = offlineSession.machineId;
+      if (offlineSession.machineInfo) session.machineInfo = offlineSession.machineInfo;
+
+      if (!session.project && offlineSession.projectId && isValidObjectId(offlineSession.projectId)) {
+        session.project = offlineSession.projectId;
+      }
+      if (!session.task && offlineSession.taskId && isValidObjectId(offlineSession.taskId)) {
+        session.task = offlineSession.taskId;
+      }
+      if (!session.taskTitle && offlineSession.taskTitle) {
+        session.taskTitle = offlineSession.taskTitle;
+      }
+
+      await session.save();
+    } else {
+      // Create new session from offline data
+      const chosenType = WORK_TYPES.includes(offlineSession.taskType)
+        ? offlineSession.taskType
+        : "Alpha";
+
+      let projectObj = null;
+      if (offlineSession.projectId && isValidObjectId(offlineSession.projectId)) {
+        projectObj = await Project.findById(offlineSession.projectId);
+      }
+      const offlineTaskId = offlineSession.taskId && isValidObjectId(offlineSession.taskId) ? offlineSession.taskId : null;
+      const offlineTaskTitle = offlineSession.taskTitle || (projectObj ? null : offlineSession.customTask) || null;
+
+      session = await WorkSession.create({
+        user: req.user._id,
+        project: projectObj ? projectObj._id : (offlineSession.projectId && isValidObjectId(offlineSession.projectId) ? offlineSession.projectId : null),
+        task: offlineTaskId,
+        taskTitle: offlineTaskTitle,
+        date: targetDate,
+        status: targetStatus,
+        segments: cleanSegments,
+        accumulatedMinutes: calcMinutes,
+        currentStart: targetStatus === "active" && offlineSession.currentStart
+          ? new Date(offlineSession.currentStart)
+          : null,
+        lastHeartbeatAt: new Date(),
+        remarks: offlineSession.remarks || "Created offline",
+        customTask: projectObj ? null : (offlineSession.customTask || "(Offline Task)"),
+        taskType: chosenType,
+        machineId: offlineSession.machineId || undefined,
+        machineInfo: offlineSession.machineInfo || undefined,
+      });
+    }
+
+    // Populate for response
+    await session.populate({
+      path: "project",
+      select: "name company category",
+      populate: [
+        { path: "company", select: "name" },
+        { path: "category", select: "name" },
+      ],
+    });
+
+    return res.json({
+      ok: true,
+      session: {
+        _id: session._id,
+        date: session.date,
+        status: session.status,
+        projectId: session.project?._id || null,
+        projectName: session.project?.name || (session.customTask ? "(Custom Task)" : "—"),
+        taskId: session.task?._id || session.task || null,
+        taskTitle: session.taskTitle || session.customTask || null,
+        companyName: session.project?.company?.name || "—",
+        categoryName: session.project?.category?.name || "—",
+        currentStart: session.currentStart || null,
+        accumulatedMinutes: session.accumulatedMinutes ?? 0,
+        totalMinutes: round2(session.accumulatedMinutes ?? 0),
+        segments: session.segments || [],
+        remarks: session.remarks || "",
+        taskType: session.taskType || null,
+      },
+    });
+  } catch (err) {
+    console.error("SYNC-OFFLINE ERROR:", err);
+    return res.status(500).json({ error: "Failed to sync offline work session." });
+  }
+});
+
 
 /* ----------------------------- ADMIN LIST ---------------------------------- */
 
@@ -278,9 +568,10 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   const { date, from, to, company, category, project, user, machine, taskType } = req.query;
 
   const q = {};
-  if (date) q.date = date;
-  if (from || to) {
-    q.date = q.date || {};
+  if (date) {
+    q.date = date;
+  } else if (from || to) {
+    q.date = {};
     if (from) q.date.$gte = from;
     if (to) q.date.$lte = to;
   }
@@ -298,6 +589,22 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   if (project) {
     if (!isValidObjectId(project)) return res.status(400).json({ error: "project must be a valid ObjectId" });
     q.project = new mongoose.Types.ObjectId(project);
+  }
+
+  // Filter by company or category if project is not directly given
+  if (company || category) {
+    const projFilter = {};
+    if (company && isValidObjectId(company)) projFilter.company = company;
+    if (category && isValidObjectId(category)) projFilter.category = category;
+    const matchingProjects = await Project.find(projFilter).select("_id").lean();
+    const projectIds = matchingProjects.map((p) => p._id);
+    if (q.project) {
+      if (!projectIds.some((id) => id.toString() === q.project.toString())) {
+        q.project = new mongoose.Types.ObjectId(); // force 0 matches
+      }
+    } else {
+      q.project = { $in: projectIds };
+    }
   }
 
   // ⬇ NEW: filter by machineId if provided
@@ -320,10 +627,7 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   // Case 1: Admin selects a single date
   if (date) {
     remarkQuery.date = date;
-  }
-
-  // Case 2: Admin selects a date range
-  if (from || to) {
+  } else if (from || to) {
     remarkQuery.date = {};
     if (from) remarkQuery.date.$gte = from;
     if (to) remarkQuery.date.$lte = to;
@@ -356,6 +660,7 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
         { path: "category", select: "name" },
       ],
     })
+    .populate("task", "title taskType status")
     .populate({ path: "user", select: "name email" })
     .sort({ createdAt: -1 })
     .lean();
@@ -381,7 +686,10 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       userEmail: s.user?.email || "",
 
       projectId: s.project?._id || null,
-      projectName: s.project?.name || s.customTask || "(No project)",
+      projectName: s.project?.name || (s.customTask ? "(Custom Task)" : "—"),
+      taskId: s.task?._id || s.task || null,
+      taskTitle: s.task?.title || s.taskTitle || s.customTask || null,
+      customTask: s.customTask || null,
 
       companyId: s.project?.company?._id || null,
       companyName: s.project?.company?.name || "—",
@@ -480,6 +788,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         { path: "category", select: "name", match: categoryMatch || {} },
       ],
     })
+    .populate("task", "title taskType status")
     .populate({ path: "user", select: "name email" })
     .sort({ createdAt: 1 }) // chronological export
     .lean();
@@ -528,6 +837,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
       "Company",
       "Category",
       "Project",
+      "Task Name",
       "Status",
       "TaskType",
       totalHeader,
@@ -552,7 +862,8 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-        Project: s.project?.name || s.customTask || "(Custom Task)",
+        Project: s.project?.name || (s.customTask ? "(Custom Task)" : "—"),
+        "Task Name": s.task?.title || s.taskTitle || s.customTask || "—",
         Status: s.status,
         TaskType: s.taskType || "",
         [totalHeader]: total,
@@ -573,13 +884,14 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
     return res.send(csv);
   }
 
-  // ---------- compact (default): 1 row per Date+User+Company+Category+Project ----------
+  // ---------- compact (default): 1 row per Date+User+Company+Category+Project+Task ----------
   const keyOf = (s) => [
     s.date || "",
     s.user?._id?.toString() || "",
     s.project?.company?._id?.toString() || "",
     s.project?.category?._id?.toString() || "",
     s.project?._id?.toString() || "",
+    s.task?._id?.toString() || s.taskTitle || s.customTask || "",
   ].join("|");
 
   const groups = new Map();
@@ -592,7 +904,8 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         Email: s.user?.email || "",
         Company: s.project?.company?.name || "—",
         Category: s.project?.category?.name || "—",
-        Project: s.project?.name || s.customTask || "(Custom Task)",
+        Project: s.project?.name || (s.customTask ? "(Custom Task)" : "—"),
+        TaskName: s.task?.title || s.taskTitle || s.customTask || "—",
 
         TotalMinutes: 0,
         SessionsCount: 0,
@@ -640,6 +953,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
     "Company",
     "Category",
     "Project",
+    "Task Name",
     totalHeader,
     "SessionsCount",
     "SegmentsCount",
@@ -660,6 +974,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
       Company: g.Company,
       Category: g.Category,
       Project: g.Project,
+      "Task Name": g.TaskName,
       [totalHeader]: convertValue(g.TotalMinutes || 0),
       SessionsCount: g.SessionsCount,
       SegmentsCount: g.SegmentsCount,

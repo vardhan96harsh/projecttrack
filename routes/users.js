@@ -7,7 +7,9 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 const router = express.Router();
 
 router.get("/", requireAuth, requireRole("admin"), async (req, res) => {
-  const users = await User.find().sort({ createdAt: -1 });
+  const users = await User.find()
+    .collation({ locale: "en", strength: 2 })
+    .sort({ name: 1 });
   res.json(users.map(u => ({
     id: u._id,
     name: u.name,
@@ -95,24 +97,40 @@ router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
 
 
 router.get("/birthdays/today", requireAuth, async (req, res) => {
-  const users = await User.find({
-    status: "active",
-    dob: { $ne: null }
-  }).select("name dob");
+  try {
+    const users = await User.find({
+      status: "active",
+      dob: { $ne: null },
+    }).select("name dob");
 
-  const today = new Date();
-  const month = today.getMonth();
-  const day = today.getDate();
+    const today = new Date();
+    const localMonth = today.getMonth();
+    const localDay = today.getDate();
+    const utcMonth = today.getUTCMonth();
+    const utcDay = today.getUTCDate();
 
-  const birthdays = users.filter(u => {
-    const d = new Date(u.dob);
-    return d.getMonth() === month && d.getDate() === day;
-  });
+    const birthdays = users.filter((u) => {
+      if (!u.dob) return false;
+      const d = new Date(u.dob);
+      if (isNaN(d.getTime())) return false;
+      // Match against local server date or UTC date to prevent timezone edge cases
+      const matchesLocal = d.getMonth() === localMonth && d.getDate() === localDay;
+      const matchesUTC = d.getUTCMonth() === utcMonth && d.getUTCDate() === utcDay;
+      const matchesCross = (d.getMonth() === utcMonth && d.getDate() === utcDay) ||
+                           (d.getUTCMonth() === localMonth && d.getUTCDate() === localDay);
+      return matchesLocal || matchesUTC || matchesCross;
+    });
 
-  res.json(birthdays.map(u => ({
-    id: u._id,
-    name: u.name,
-    dob: u.dob
-  })));
+    res.json(
+      birthdays.map((u) => ({
+        id: u._id,
+        name: u.name,
+        dob: u.dob,
+      }))
+    );
+  } catch (err) {
+    console.error("BIRTHDAYS TODAY ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch today's birthdays" });
+  }
 });
 export default router;
