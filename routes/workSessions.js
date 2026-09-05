@@ -248,9 +248,27 @@ router.post("/resume", requireAuth, async (req, res) => {
     session = await WorkSession.findOne({ _id: sessionId, user: req.user._id });
   }
   if (!session) {
-    session = await WorkSession.findOne({ user: req.user._id, status: "paused" }).sort({ updatedAt: -1 });
+    session = await WorkSession.findOne({ user: req.user._id, status: "paused" }).sort({ updatedAt: -1, createdAt: -1 });
   }
-  if (!session) return res.status(404).json({ error: "No paused session found." });
+  // If the session is already active, return it immediately without error
+  if (!session) {
+    const alreadyActive = await WorkSession.findOne({ user: req.user._id, status: "active" }).sort({ createdAt: -1 });
+    if (alreadyActive) {
+      const proj = alreadyActive.project ? await Project.findById(alreadyActive.project).select("_id name").populate("company category", "name") : null;
+      const tDoc = alreadyActive.task ? await Task.findById(alreadyActive.task) : null;
+      return res.json({
+        ...alreadyActive.toObject(),
+        projectId: proj ? proj._id : null,
+        projectName: proj ? proj.name : (alreadyActive.customTask ? "(Custom Task)" : "—"),
+        taskId: tDoc ? tDoc._id : null,
+        taskTitle: alreadyActive.taskTitle || tDoc?.title || (alreadyActive.customTask || null),
+        companyName: proj?.company?.name || "—",
+        categoryName: proj?.category?.name || "—",
+        totalMinutes: round2(alreadyActive.accumulatedMinutes || 0),
+      });
+    }
+    return res.status(404).json({ error: "No paused session found to resume." });
+  }
 
   // If there are any other active sessions, auto-pause them
   const otherActive = await WorkSession.find({ user: req.user._id, status: "active", _id: { $ne: session._id } });
