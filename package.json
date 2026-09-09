@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node server.js",
     "build": "echo \"no build step\"",
-    "seed": "node seed.js"
+    "seed": "node seed.js",
+    "test": "node test_local_e2e.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

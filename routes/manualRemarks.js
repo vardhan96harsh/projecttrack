@@ -22,14 +22,14 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 router.post("/", requireAuth, async (req, res) => {
-  const { text, requestedMinutes, project, taskType, customTask } = req.body;
+  const { text, requestedMinutes, project, taskType, customTask, date } = req.body;
 
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "Remark text cannot be empty" });
   }
 
-  if (!requestedMinutes || requestedMinutes <= 0) {
-    return res.status(400).json({ error: "Requested time is required" });
+  if (!requestedMinutes || Number(requestedMinutes) <= 0) {
+    return res.status(400).json({ error: "Requested time must be greater than 0 minutes" });
   }
 
   if (!project && !customTask) {
@@ -37,6 +37,7 @@ router.post("/", requireAuth, async (req, res) => {
   }
 
   const today = new Date().toISOString().slice(0, 10);
+  const targetDate = date ? String(date).slice(0, 10) : today;
 
   const created = await ManualRemark.create({
     user: req.user._id,
@@ -46,7 +47,7 @@ router.post("/", requireAuth, async (req, res) => {
     taskType: taskType || "Alpha",
     customTask: customTask || null,
     status: "pending",
-    date: today,
+    date: targetDate,
   });
 
   // ✅ RETURN POPULATED RECORD
@@ -57,21 +58,28 @@ router.post("/", requireAuth, async (req, res) => {
   res.json(remark);
 });
 
-
-
 // Update remark
 router.put("/:id", requireAuth, async (req, res) => {
-  const { text } = req.body;
+  const { text, requestedMinutes, taskType, date, customTask } = req.body;
+
+  const update = {};
+  if (text !== undefined && text.trim()) update.text = text.trim();
+  if (requestedMinutes !== undefined && Number(requestedMinutes) > 0) {
+    update.requestedMinutes = Number(requestedMinutes);
+  }
+  if (taskType) update.taskType = taskType;
+  if (date) update.date = String(date).slice(0, 10);
+  if (customTask !== undefined) update.customTask = customTask ? customTask.trim() : null;
 
   const updated = await ManualRemark.findOneAndUpdate(
     {
       _id: req.params.id,
       user: req.user._id,
-      status: "pending", // 🔒 ADD THIS LINE
+      status: "pending", // 🔒 Only editable while pending
     },
-    { text: text.trim() },
+    update,
     { new: true }
-  );
+  ).populate("project", "name");
 
   if (!updated) {
     return res
