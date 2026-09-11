@@ -14,15 +14,21 @@ const router = express.Router();
 // Get logged-in user's remarks
 router.get("/", requireAuth, async (req, res) => {
   const list = await ManualRemark.find({ user: req.user._id })
-   .populate("project", "name") 
+    .populate("project", "name") 
     .sort({ createdAt: -1 })
     .lean();
 
-  res.json(list);
+  res.json(
+    list.map((r) => ({
+      ...r,
+      projectName: r.project?.name || r.customTask || null,
+    }))
+  );
 });
 
 router.post("/", requireAuth, async (req, res) => {
-  const { text, requestedMinutes, project, taskType, customTask, date } = req.body;
+  const { text, requestedMinutes, project, projectId, taskType, customTask, date } = req.body;
+  const targetProject = project || projectId || null;
 
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "Remark text cannot be empty" });
@@ -32,7 +38,7 @@ router.post("/", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Requested time must be greater than 0 minutes" });
   }
 
-  if (!project && !customTask) {
+  if (!targetProject && !customTask) {
     return res.status(400).json({ error: "Select project OR enter custom task" });
   }
 
@@ -43,24 +49,27 @@ router.post("/", requireAuth, async (req, res) => {
     user: req.user._id,
     text: text.trim(),
     requestedMinutes: Number(requestedMinutes),
-    project: project || null,
+    project: targetProject || null,
     taskType: taskType || "Alpha",
-    customTask: customTask || null,
+    customTask: customTask ? customTask.trim() : null,
     status: "pending",
     date: targetDate,
   });
 
-  // ✅ RETURN POPULATED RECORD
+  // ✅ RETURN POPULATED RECORD WITH PROJECT NAME
   const remark = await ManualRemark.findById(created._id)
     .populate("project", "name")
     .lean();
 
-  res.json(remark);
+  res.json({
+    ...remark,
+    projectName: remark.project?.name || remark.customTask || null,
+  });
 });
 
 // Update remark
 router.put("/:id", requireAuth, async (req, res) => {
-  const { text, requestedMinutes, taskType, date, customTask } = req.body;
+  const { text, requestedMinutes, taskType, date, customTask, project, projectId } = req.body;
 
   const update = {};
   if (text !== undefined && text.trim()) update.text = text.trim();
@@ -70,6 +79,9 @@ router.put("/:id", requireAuth, async (req, res) => {
   if (taskType) update.taskType = taskType;
   if (date) update.date = String(date).slice(0, 10);
   if (customTask !== undefined) update.customTask = customTask ? customTask.trim() : null;
+  if (project !== undefined || projectId !== undefined) {
+    update.project = project || projectId || null;
+  }
 
   const updated = await ManualRemark.findOneAndUpdate(
     {
@@ -79,7 +91,7 @@ router.put("/:id", requireAuth, async (req, res) => {
     },
     update,
     { new: true }
-  ).populate("project", "name");
+  ).populate("project", "name").lean();
 
   if (!updated) {
     return res
@@ -87,7 +99,10 @@ router.put("/:id", requireAuth, async (req, res) => {
       .json({ error: "Cannot edit after approval/rejection" });
   }
 
-  res.json(updated);
+  res.json({
+    ...updated,
+    projectName: updated.project?.name || updated.customTask || null,
+  });
 });
 
 // Delete remark
@@ -167,9 +182,9 @@ router.get("/admin", requireAuth, async (req, res) => {
       date: r.date,
       createdAt: r.createdAt,
        projectId: r.project?._id || null,
-    projectName: r.project?.name || null,
-    taskType: r.taskType || null,
-    customTask: r.customTask || null,
+      projectName: r.project?.name || r.customTask || null,
+      taskType: r.taskType || null,
+      customTask: r.customTask || null,
     }))
   );
 });
