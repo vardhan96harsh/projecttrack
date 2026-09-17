@@ -284,14 +284,63 @@ router.post("/resume", requireAuth, async (req, res) => {
     await s.save();
   }
 
-  session.status = "active";
-  session.currentStart = new Date();
-  session.lastHeartbeatAt = new Date(); 
+  const todayStr = ymd(new Date());
 
-  if (machineId) session.machineId = machineId;
-  if (machineInfo) session.machineInfo = machineInfo;
+  // 🔹 If the paused session belongs to a PREVIOUS day, finalize it and rollover to a new session today!
+  if (session.date !== todayStr) {
+    session.status = "stopped";
+    if (!session.remarks?.includes("Auto-closed on day-end")) {
+      session.remarks = session.remarks ? `${session.remarks} | Auto-closed on day-end` : "Auto-closed on day-end";
+    }
+    await session.save();
 
-  await session.save();
+    // Check if there's already an active/paused session today for this project/task
+    let todaySession = await WorkSession.findOne({
+      user: req.user._id,
+      project: session.project,
+      task: session.task,
+      customTask: session.customTask,
+      date: todayStr,
+      status: { $in: ["active", "paused"] },
+    }).sort({ createdAt: -1 });
+
+    if (todaySession) {
+      todaySession.status = "active";
+      todaySession.currentStart = new Date();
+      todaySession.lastHeartbeatAt = new Date();
+      if (machineId) todaySession.machineId = machineId;
+      if (machineInfo) todaySession.machineInfo = machineInfo;
+      await todaySession.save();
+      session = todaySession;
+    } else {
+      session = await WorkSession.create({
+        user: req.user._id,
+        project: session.project,
+        task: session.task,
+        taskTitle: session.taskTitle,
+        customTask: session.customTask,
+        taskType: session.taskType,
+        date: todayStr,
+        status: "active",
+        segments: [],
+        accumulatedMinutes: 0,
+        currentStart: new Date(),
+        lastHeartbeatAt: new Date(),
+        remarks: "Resumed from previous day",
+        machineId: machineId || session.machineId || undefined,
+        machineInfo: machineInfo || session.machineInfo || undefined,
+      });
+    }
+  } else {
+    session.status = "active";
+    session.currentStart = new Date();
+    session.lastHeartbeatAt = new Date();
+
+    if (machineId) session.machineId = machineId;
+    if (machineInfo) session.machineInfo = machineInfo;
+
+    await session.save();
+  }
 
   const project = session.project ? await Project.findById(session.project).select("_id name").populate("company category", "name") : null;
   const taskDoc = session.task ? await Task.findById(session.task) : null;
