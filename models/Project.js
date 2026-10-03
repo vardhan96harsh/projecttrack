@@ -23,16 +23,24 @@ const projectSchema = new mongoose.Schema(
       default: "",
     },
     code: {
-  type: String,
-  trim: true,
-  default: "",
-},
-
-status: {
-  type: String,
-  enum: ["active", "open", "in_progress", "hold", "completed", "cancelled"],
-  default: "active",
-},
+      type: String,
+      trim: true,
+      default: "",
+    },
+    date: {
+      type: String,
+      trim: true,
+      default: () => {
+        const d = new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      },
+    },
+    status: {
+      type: String,
+      enum: ["active", "open", "in_progress", "hold", "completed", "cancelled"],
+      default: "active",
+    },
   },
   { timestamps: true }
 );

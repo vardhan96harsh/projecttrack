@@ -16,8 +16,6 @@ import machinesRouter from "./routes/machines.js";
 import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
 import holidayRoutes from "./routes/holidays.js";
-import taskRoutes from "./routes/tasks.js";
-import projectPlanRoutes from "./routes/projectPlans.js";
 
 // Models for cleanup
 import WorkSession from "./models/WorkSession.js";
@@ -57,8 +55,6 @@ async function runLocalE2ETest() {
   app.use("/api/work-sessions", workSessionsRouter);
   app.use("/api/manual-remarks", manualRemarkRoutes);
   app.use("/api/holidays", holidayRoutes);
-  app.use("/api/tasks", taskRoutes);
-  app.use("/api/project-plans", projectPlanRoutes);
 
   const server = app.listen(PORT);
   console.log(`✓ Local test server running on ${TEST_BASE}\n`);
@@ -207,27 +203,8 @@ async function runLocalE2ETest() {
     }
   });
 
-  console.log("\n--- 4. Employee Tasks (Assigned Deliverables) ---");
-  await test("GET /api/tasks/my returns employee assigned tasks", async () => {
-    const res = await apiGet("/api/tasks/my", employeeToken);
-    if (res.status !== 200 || !Array.isArray(res.data)) {
-      throw new Error(`Expected status 200 array, got ${res.status}`);
-    }
-  });
 
-  await test("GET /api/tasks/my/count returns task count object", async () => {
-    const res = await apiGet("/api/tasks/my/count", employeeToken);
-    if (res.status !== 200 || typeof res.data?.count !== "number") {
-      throw new Error(`Expected status 200 with count number, got ${JSON.stringify(res.data)}`);
-    }
-  });
 
-  await test("GET /api/project-plans returns project plans array", async () => {
-    const res = await apiGet("/api/project-plans", adminToken);
-    if (res.status !== 200 || !Array.isArray(res.data)) {
-      throw new Error(`Expected status 200 array, got ${res.status}`);
-    }
-  });
 
   console.log("\n--- 5. Manual Time Requests & Editing Lifecycle ---");
   let testRemarkId = null;

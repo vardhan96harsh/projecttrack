@@ -826,24 +826,15 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
   }
 
 
-  // We'll filter by company/category via populate match
-  const companyMatch =
-    company && isValidObjectId(company)
-      ? { _id: new mongoose.Types.ObjectId(company) }
-      : company
-        ? (await (async () => {
-          return res.status(400).json({ error: "company must be a valid ObjectId" });
-        })())
-        : {};
+  if (company && !isValidObjectId(company)) {
+    return res.status(400).json({ error: "company must be a valid ObjectId" });
+  }
+  if (category && !isValidObjectId(category)) {
+    return res.status(400).json({ error: "category must be a valid ObjectId" });
+  }
 
-  const categoryMatch =
-    category && isValidObjectId(category)
-      ? { _id: new mongoose.Types.ObjectId(category) }
-      : category
-        ? (await (async () => {
-          return res.status(400).json({ error: "category must be a valid ObjectId" });
-        })())
-        : {};
+  const companyMatch = company ? { _id: new mongoose.Types.ObjectId(company) } : {};
+  const categoryMatch = category ? { _id: new mongoose.Types.ObjectId(category) } : {};
 
   // ---- Query sessions + populate ----
   const rows = await WorkSession.find(q)
