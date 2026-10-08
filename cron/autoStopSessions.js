@@ -24,7 +24,7 @@ export async function autoStopAbandonedSessions() {
     }
     if (endTime > new Date()) endTime = new Date();
 
-    s.segments.push({ start: s.currentStart, end: endTime });
+    s.segments.push({ start: s.currentStart, end: endTime, source: "auto-pause-heartbeat" });
 
     const ms = endTime.getTime() - new Date(s.currentStart).getTime();
     const minutes = ms > 0 ? ms / 60000 : 0;
@@ -40,6 +40,7 @@ export async function autoStopAbandonedSessions() {
   }
 
   if (sessions.length) {
-    console.log(`🛑 Auto-stopped abandoned sessions: ${sessions.length}`);
+    console.log(`⏸️ Auto-paused abandoned sessions (no heartbeat): ${sessions.length}`);
   }
+
 }

@@ -152,6 +152,7 @@ router.post("/start", requireAuth, async (req, res) => {
     customTask: project ? null : (customTask || null),
     date: todayStr,
     status: "paused",
+    taskType: chosenType,
   }).sort({ createdAt: -1 });
 
   if (matchingPaused) {
@@ -300,6 +301,7 @@ router.post("/resume", requireAuth, async (req, res) => {
       project: session.project,
       task: session.task,
       customTask: session.customTask,
+      taskType: session.taskType,
       date: todayStr,
       status: { $in: ["active", "paused"] },
     }).sort({ createdAt: -1 });
@@ -416,7 +418,21 @@ router.get("/my", requireAuth, async (req, res) => {
     .lean();
 
   const data = rows.map((s) => {
-    let total = s.accumulatedMinutes ?? 0;
+    let accMins = s.accumulatedMinutes ?? 0;
+    // Guard against corrupt runaway accumulatedMinutes (> 1440 min/day) from previous sync bugs
+    if (accMins > 1440 && Array.isArray(s.segments) && s.segments.length > 0) {
+      let segMs = 0;
+      for (const seg of s.segments) {
+        if (seg.start && seg.end) {
+          const st = new Date(seg.start).getTime();
+          const et = new Date(seg.end).getTime();
+          if (et > st) segMs += (et - st);
+        }
+      }
+      accMins = Math.min(1440, round2(segMs / 60000));
+    }
+
+    let total = accMins;
 
     if (s.status === "active" && s.currentStart) {
       total += (Date.now() - new Date(s.currentStart)) / 60000;
@@ -434,7 +450,7 @@ router.get("/my", requireAuth, async (req, res) => {
       companyName: s.project?.company?.name || "—",
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
-      accumulatedMinutes: s.accumulatedMinutes ?? 0,
+      accumulatedMinutes: accMins,
       totalMinutes: round2(total),
       segments: s.segments || [],
       remarks: s.remarks || "",
@@ -491,11 +507,17 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
       });
     }
 
-    // 2. Fallback: find active or paused session for today with matching project
+    const chosenType = WORK_TYPES.includes(offlineSession.taskType)
+      ? offlineSession.taskType
+      : "Alpha";
+
+    // 2. Fallback: find active or paused session for today with matching project and taskType
     if (!session) {
       const q = {
         user: req.user._id,
         date: targetDate,
+        taskType: chosenType,
+        status: { $in: ["active", "paused"] },
       };
       if (offlineSession.projectId && isValidObjectId(offlineSession.projectId)) {
         q.project = offlineSession.projectId;
@@ -505,36 +527,90 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
       session = await WorkSession.findOne(q);
     }
 
-    // 3. Process segments & calculate accumulated time
+    // 3. Process segments safely
     const inputSegments = Array.isArray(offlineSession.segments) ? offlineSession.segments : [];
-    let totalMs = 0;
     const cleanSegments = [];
 
     for (const seg of inputSegments) {
       if (!seg.start) continue;
       const s = new Date(seg.start);
       const e = seg.end ? new Date(seg.end) : null;
+      if (isNaN(s.getTime())) continue;
+      if (e && isNaN(e.getTime())) continue;
+
       cleanSegments.push({
         start: s,
         end: e,
         manual: !!seg.manual,
         source: seg.source || "offline-sync",
       });
-      if (e && e > s) {
-        totalMs += (e.getTime() - s.getTime());
-      }
     }
 
     const targetStatus = ["active", "paused", "stopped"].includes(offlineSession.status)
       ? offlineSession.status
       : "paused";
 
-    const calcMinutes = round2(totalMs / 60000);
-
     if (session) {
-      // Reconcile into existing session
-      session.segments = cleanSegments;
-      session.accumulatedMinutes = Math.max(session.accumulatedMinutes || 0, calcMinutes);
+      // Reconcile into existing session with strict deduplication
+      const existingSegs = Array.isArray(session.segments) ? session.segments : [];
+      const mergedSegments = [...existingSegs];
+
+      for (const inSeg of cleanSegments) {
+        if (!inSeg.start) continue;
+        const inStart = inSeg.start.getTime();
+        const inEnd = inSeg.end ? inSeg.end.getTime() : null;
+
+        // Check if an existing segment matches this start time (within 3s tolerance)
+        const matchIdx = mergedSegments.findIndex((ex) => {
+          if (!ex.start) return false;
+          return Math.abs(new Date(ex.start).getTime() - inStart) < 3000;
+        });
+
+        if (matchIdx >= 0) {
+          const exSeg = mergedSegments[matchIdx];
+          const exEnd = exSeg.end ? new Date(exSeg.end).getTime() : null;
+          // If incoming segment has a more recent / complete end time, update existing end
+          if (inEnd && (!exEnd || inEnd > exEnd)) {
+            exSeg.end = inSeg.end;
+          }
+        } else {
+          // Truly new segment
+          mergedSegments.push(inSeg);
+        }
+      }
+
+      // If session was auto-paused due to missing heartbeat, but user was active continuous offline
+      if (targetStatus === "active" && offlineSession.currentStart) {
+        const offStartTime = new Date(offlineSession.currentStart).getTime();
+        for (let i = mergedSegments.length - 1; i >= 0; i--) {
+          const seg = mergedSegments[i];
+          if (
+            seg.source === "auto-pause-heartbeat" ||
+            (session.remarks && session.remarks.includes("Auto-paused (no heartbeat)") &&
+             Math.abs(new Date(seg.start).getTime() - offStartTime) < 5000)
+          ) {
+            mergedSegments.splice(i, 1);
+          }
+        }
+      }
+
+      // Sort segments chronologically
+      mergedSegments.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+      session.segments = mergedSegments;
+
+      // Recalculate accumulated minutes strictly from all unique closed segments
+      let totalMergedMs = 0;
+      for (const seg of session.segments) {
+        if (seg.start && seg.end) {
+          const sTime = new Date(seg.start).getTime();
+          const eTime = new Date(seg.end).getTime();
+          if (eTime > sTime) {
+            totalMergedMs += (eTime - sTime);
+          }
+        }
+      }
+      session.accumulatedMinutes = round2(totalMergedMs / 60000);
+
       session.status = targetStatus;
       session.currentStart = targetStatus === "active" && offlineSession.currentStart
         ? new Date(offlineSession.currentStart)
@@ -571,6 +647,18 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
       const offlineTaskId = offlineSession.taskId && isValidObjectId(offlineSession.taskId) ? offlineSession.taskId : null;
       const offlineTaskTitle = offlineSession.taskTitle || (projectObj ? null : offlineSession.customTask) || null;
 
+      let totalNewMs = 0;
+      for (const seg of cleanSegments) {
+        if (seg.start && seg.end) {
+          const sTime = new Date(seg.start).getTime();
+          const eTime = new Date(seg.end).getTime();
+          if (eTime > sTime) {
+            totalNewMs += (eTime - sTime);
+          }
+        }
+      }
+      const calcMinutes = round2(totalNewMs / 60000);
+
       session = await WorkSession.create({
         user: req.user._id,
         project: projectObj ? projectObj._id : (offlineSession.projectId && isValidObjectId(offlineSession.projectId) ? offlineSession.projectId : null),
@@ -602,6 +690,10 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
       ],
     });
 
+    const liveActiveMinutes = session.status === "active" && session.currentStart
+      ? Math.max(0, (Date.now() - new Date(session.currentStart).getTime()) / 60000)
+      : 0;
+
     return res.json({
       ok: true,
       session: {
@@ -616,7 +708,7 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
         categoryName: session.project?.category?.name || "—",
         currentStart: session.currentStart || null,
         accumulatedMinutes: session.accumulatedMinutes ?? 0,
-        totalMinutes: round2(session.accumulatedMinutes ?? 0),
+        totalMinutes: round2((session.accumulatedMinutes ?? 0) + liveActiveMinutes),
         segments: session.segments || [],
         remarks: session.remarks || "",
         taskType: session.taskType || null,
@@ -733,7 +825,19 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
     .lean();
 
   const data = rows.map((s) => {
-    let total = s.accumulatedMinutes ?? 0;
+    let accMins = s.accumulatedMinutes ?? 0;
+    if (accMins > 1440 && Array.isArray(s.segments) && s.segments.length > 0) {
+      let segMs = 0;
+      for (const seg of s.segments) {
+        if (seg.start && seg.end) {
+          const st = new Date(seg.start).getTime();
+          const et = new Date(seg.end).getTime();
+          if (et > st) segMs += (et - st);
+        }
+      }
+      accMins = Math.min(1440, round2(segMs / 60000));
+    }
+    let total = accMins;
     if (s.status === "active" && s.currentStart) {
       total += (Date.now() - new Date(s.currentStart)) / 60000;
     }
@@ -786,12 +890,14 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
 
   // ---- Build base query (same as /admin/list) ----
   const q = {};
-  if (date) q.date = date;
-  if (from || to) {
-    q.date = q.date || {};
+  if (date) {
+    q.date = date;
+  } else if (from || to) {
+    q.date = {};
     if (from) q.date.$gte = from;
     if (to) q.date.$lte = to;
   }
+
 
   // user filter: id OR name/email
   if (user) {

@@ -299,6 +299,155 @@ async function runLocalE2ETest() {
     }
   });
 
+  console.log("\n--- 8. Verification of Bug Fixes (TaskType Isolation, Reject Guard, Sync Merge) ---");
+  await test("POST /api/manual-remarks/:id/reject only allows pending requests", async () => {
+    const createRes = await apiPost(
+      "/api/manual-remarks",
+      {
+        text: "Guard test remark",
+        requestedMinutes: 45,
+        customTask: "Guard Test Task",
+      },
+      employeeToken
+    );
+    const remarkId = createRes.data?._id;
+    if (!remarkId) throw new Error("Could not create guard test remark");
+
+    // 1st reject should succeed
+    const rejRes1 = await apiPost(`/api/manual-remarks/${remarkId}/reject`, {}, adminToken);
+    if (rejRes1.status !== 200) throw new Error(`1st reject expected 200, got ${rejRes1.status}`);
+
+    // 2nd reject should fail with 400
+    const rejRes2 = await apiPost(`/api/manual-remarks/${remarkId}/reject`, {}, adminToken);
+    if (rejRes2.status !== 400) throw new Error(`2nd reject expected 400, got ${rejRes2.status}`);
+
+    await ManualRemark.findByIdAndDelete(remarkId);
+  });
+
+  await test("POST /api/work-sessions/start does not overwrite paused session with different taskType", async () => {
+    const project = await mongoose.model("Project").findOne().lean();
+    const projectId = project?._id?.toString();
+
+    // Start 1st session: Analysis
+    const s1 = await apiPost(
+      "/api/work-sessions/start",
+      { customTask: "TaskType Test Custom", taskType: "Analysis" },
+      employeeToken
+    );
+    if (s1.status !== 200 || !s1.data?._id) throw new Error("Could not start Analysis session");
+
+    // Pause 1st session
+    await apiPost("/api/work-sessions/pause", {}, employeeToken);
+
+    // Start 2nd session: Alpha on same customTask
+    const s2 = await apiPost(
+      "/api/work-sessions/start",
+      { customTask: "TaskType Test Custom", taskType: "Alpha" },
+      employeeToken
+    );
+    if (s2.status !== 200 || !s2.data?._id) throw new Error("Could not start Alpha session");
+
+    // Verify s1 is still in DB with taskType 'Analysis'
+    const s1Check = await WorkSession.findById(s1.data._id).lean();
+    if (s1Check.taskType !== "Analysis") {
+      throw new Error(`TaskType corrupted! Expected 'Analysis', got '${s1Check.taskType}'`);
+    }
+
+    // Clean up
+    await apiPost("/api/work-sessions/stop", {}, employeeToken);
+    await WorkSession.deleteMany({ _id: { $in: [s1.data._id, s2.data._id] } });
+  });
+
+  await test("POST /api/work-sessions/sync-offline merges offline segments without wiping prior time", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    // Create base session with 60 minutes
+    const baseSess = await WorkSession.create({
+      user: employeeUser._id,
+      customTask: "Offline Merge Test Task",
+      date: today,
+      status: "paused",
+      accumulatedMinutes: 60,
+      taskType: "CR",
+      segments: [{
+        start: new Date(Date.now() - 3600000),
+        end: new Date(),
+        manual: false,
+        source: "online",
+      }],
+    });
+
+    // Offline session for same task with 30 mins
+    const segStart = new Date(Date.now() - 1800000);
+    const segEnd = new Date();
+    const syncRes = await apiPost(
+      "/api/work-sessions/sync-offline",
+      {
+        offlineSession: {
+          _id: "offline_test_123",
+          date: today,
+          customTask: "Offline Merge Test Task",
+          taskType: "CR",
+          status: "paused",
+          accumulatedMinutes: 30,
+          segments: [{
+            start: segStart.toISOString(),
+            end: segEnd.toISOString(),
+            manual: false,
+          }],
+        },
+      },
+      employeeToken
+    );
+
+    if (syncRes.status !== 200 || !syncRes.data?.session) {
+      throw new Error(`Sync failed: ${JSON.stringify(syncRes.data)}`);
+    }
+
+    const updated = await WorkSession.findById(baseSess._id).lean();
+    if (updated.accumulatedMinutes < 89) { // ~60 + 30 = 90
+      throw new Error(`Accumulated minutes lost! Expected ~90, got ${updated.accumulatedMinutes}`);
+    }
+    if (updated.segments.length < 2) {
+      throw new Error(`Segments lost! Expected >= 2, got ${updated.segments.length}`);
+    }
+
+    // Call sync-offline 4 more times with the exact same payload to verify idempotency
+    for (let i = 0; i < 4; i++) {
+      const repeatRes = await apiPost(
+        "/api/work-sessions/sync-offline",
+        {
+          offlineSession: {
+            _id: "offline_test_123",
+            date: today,
+            customTask: "Offline Merge Test Task",
+            taskType: "CR",
+            status: "paused",
+            accumulatedMinutes: 30,
+            segments: [{
+              start: segStart.toISOString(),
+              end: segEnd.toISOString(),
+              manual: false,
+            }],
+          },
+        },
+        employeeToken
+      );
+      if (repeatRes.status !== 200) {
+        throw new Error(`Repeat sync failed at iteration ${i}`);
+      }
+    }
+
+    const idempotentCheck = await WorkSession.findById(baseSess._id).lean();
+    if (idempotentCheck.segments.length !== 2) {
+      throw new Error(`Segments duplicated on repeated sync! Expected 2, got ${idempotentCheck.segments.length}`);
+    }
+    if (Math.abs(idempotentCheck.accumulatedMinutes - updated.accumulatedMinutes) > 0.05) {
+      throw new Error(`Minutes inflated on repeated sync! Expected ${updated.accumulatedMinutes}, got ${idempotentCheck.accumulatedMinutes}`);
+    }
+
+    await WorkSession.findByIdAndDelete(baseSess._id);
+  });
+
   // Cleanup in case test failed midway
   if (testRemarkId) {
     await ManualRemark.findByIdAndDelete(testRemarkId);

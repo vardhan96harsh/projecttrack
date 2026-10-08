@@ -113,12 +113,11 @@ router.get("/birthdays/today", requireAuth, async (req, res) => {
       if (!u.dob) return false;
       const d = new Date(u.dob);
       if (isNaN(d.getTime())) return false;
-      // Match against local server date or UTC date to prevent timezone edge cases
+      // Match against local server date OR UTC date to handle timezone boundary cases
       const matchesLocal = d.getMonth() === localMonth && d.getDate() === localDay;
       const matchesUTC = d.getUTCMonth() === utcMonth && d.getUTCDate() === utcDay;
-      const matchesCross = (d.getMonth() === utcMonth && d.getDate() === utcDay) ||
-                           (d.getUTCMonth() === localMonth && d.getUTCDate() === localDay);
-      return matchesLocal || matchesUTC || matchesCross;
+      return matchesLocal || matchesUTC;
+
     });
 
     res.json(
