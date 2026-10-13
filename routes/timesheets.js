@@ -15,7 +15,7 @@ router.post("/", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
   const created = await Timesheet.create({
-    user: req.user.id,
+    user: req.user._id || req.user.id,
     company, category, project, taskType, hours, remarks,
     dateLogged: new Date(dateLogged)
   });
@@ -26,7 +26,7 @@ router.post("/", requireAuth, async (req, res) => {
 router.get("/", requireAuth, async (req, res) => {
   const { company, category, project, user, from, to, taskType } = req.query;
   const q = {};
-  if (req.user.role !== "admin") q.user = req.user.id;
+  if (req.user.role !== "admin") q.user = req.user._id || req.user.id;
   if (user && req.user.role === "admin") q.user = user;
   if (company) q.company = company;
   if (category) q.category = category;

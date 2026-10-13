@@ -736,8 +736,11 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
   }
 
   if (user) {
-    if (isValidObjectId(user)) q.user = new mongoose.Types.ObjectId(user);
-    else {
+    if (user === "unknown") {
+      q.$or = [{ user: null }, { user: { $exists: false } }];
+    } else if (isValidObjectId(user)) {
+      q.user = new mongoose.Types.ObjectId(user);
+    } else {
       const u = await User.findOne({ $or: [{ name: user }, { email: user }] })
         .select("_id").lean();
       if (!u) return res.status(400).json({ error: `No user found for '${user}'` });

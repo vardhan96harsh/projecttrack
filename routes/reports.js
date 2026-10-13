@@ -4,6 +4,8 @@ import mongoose from "mongoose";
 import WorkSession from "../models/WorkSession.js";
 import Project from "../models/Project.js";
 import User from "../models/User.js";
+import Company from "../models/Company.js";
+import Category from "../models/Category.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 
 const router = express.Router();
@@ -14,18 +16,34 @@ const isHexObjectId = (v) => typeof v === "string" && /^[0-9a-fA-F]{24}$/.test(v
 
 function parseDateRange(from, to) {
   const range = {};
-  if (from) range.$gte = String(from).slice(0, 10);
-  if (to) range.$lte = String(to).slice(0, 10);
+  if (from && from !== "undefined" && from !== "null" && String(from).trim()) {
+    range.$gte = String(from).trim().slice(0, 10);
+  }
+  if (to && to !== "undefined" && to !== "null" && String(to).trim()) {
+    range.$lte = String(to).trim().slice(0, 10);
+  }
   return range;
 }
 
 /**
  * Calculates session hours safely.
  * Caps runaway active time for abandoned/stale sessions (max 14 hours continuous)
- * to avoid reporting skewed multi-hundred hour anomalies.
+ * and guards against corrupt runaway accumulatedMinutes (> 1440 min/day).
  */
 function calculateSessionHours(s) {
   let minutes = Number(s.accumulatedMinutes) || 0;
+  if (minutes > 1440 && Array.isArray(s.segments) && s.segments.length > 0) {
+    let segMs = 0;
+    for (const seg of s.segments) {
+      if (seg.start && seg.end) {
+        const st = new Date(seg.start).getTime();
+        const et = new Date(seg.end).getTime();
+        if (et > st) segMs += (et - st);
+      }
+    }
+    minutes = Math.min(1440, segMs / 60000);
+  }
+
   if (s.status === "active" && s.currentStart) {
     const elapsedMs = Date.now() - new Date(s.currentStart).getTime();
     if (elapsedMs > 0) {
@@ -53,6 +71,98 @@ function escapeCsvField(val) {
   return `"${str.replace(/"/g, '""')}"`;
 }
 
+/**
+ * Resolve user filter safely. If user was specified by name or ID but not found,
+ * force 0 matches instead of leaking all users' records.
+ */
+async function resolveUserFilter(user) {
+  if (!user || user === "all") return {};
+  if (user === "unknown") {
+    return { $or: [{ user: null }, { user: { $exists: false } }] };
+  }
+  if (isHexObjectId(user)) {
+    return { user: new mongoose.Types.ObjectId(user) };
+  }
+  const u = await User.findOne({ $or: [{ name: user }, { email: user }] }).select("_id").lean();
+  if (u) {
+    return { user: u._id };
+  }
+  // User name/email given but does not exist -> force 0 matches
+  return { user: new mongoose.Types.ObjectId() };
+}
+
+/**
+ * Resolve project, company, and category filters safely.
+ * Correctly handles ObjectId, Name lookups, general projects, and custom tasks.
+ */
+async function resolveProjectFilter({ project, company, category }) {
+  let projectQuery = undefined;
+  let customTaskQuery = undefined;
+
+  if (project) {
+    if (project === "null" || project === "general") {
+      projectQuery = null;
+    } else if (typeof project === "string" && project.startsWith("custom_")) {
+      projectQuery = null;
+      customTaskQuery = project.replace(/^custom_/, "");
+    } else if (isHexObjectId(project)) {
+      projectQuery = new mongoose.Types.ObjectId(project);
+    } else {
+      const p = await Project.findOne({ name: project }).select("_id").lean();
+      if (p) {
+        projectQuery = p._id;
+      } else {
+        projectQuery = new mongoose.Types.ObjectId(); // force 0 matches
+      }
+    }
+  }
+
+  if (company || category) {
+    const projFilter = {};
+    if (company) {
+      if (isHexObjectId(company)) {
+        projFilter.company = new mongoose.Types.ObjectId(company);
+      } else {
+        const c = await Company.findOne({ name: company }).select("_id").lean();
+        projFilter.company = c ? c._id : new mongoose.Types.ObjectId();
+      }
+    }
+
+    if (category) {
+      if (isHexObjectId(category)) {
+        projFilter.category = new mongoose.Types.ObjectId(category);
+      } else {
+        const cat = await Category.findOne({ name: category }).select("_id").lean();
+        projFilter.category = cat ? cat._id : new mongoose.Types.ObjectId();
+      }
+    }
+
+    const matched = await Project.find(projFilter).select("_id").lean();
+    const projIds = matched.map((p) => p._id);
+
+    if (projectQuery) {
+      const matches = projIds.some((id) => id.toString() === projectQuery.toString());
+      return {
+        project: matches ? projectQuery : new mongoose.Types.ObjectId(), // force 0 matches
+      };
+    } else if (projectQuery === null) {
+      // General/custom sessions don't have a company/category
+      return { project: new mongoose.Types.ObjectId() }; // force 0 matches
+    } else {
+      return { project: { $in: projIds } };
+    }
+  }
+
+  const result = {};
+  if (projectQuery !== undefined) {
+    result.project = projectQuery;
+  }
+  if (customTaskQuery !== undefined) {
+    result.customTask = customTaskQuery;
+  }
+  return result;
+}
+
 // ─────────────────────────────────────────────
 // GET /api/reports/summary
 // Summary aggregation by dim: "project" | "company" | "category" | "user"
@@ -64,32 +174,17 @@ router.get("/summary", requireAuth, requireRole("admin"), async (req, res) => {
 
     const match = {};
     if (from || to) {
-      match.date = parseDateRange(from, to);
-    }
-
-    if (user) {
-      if (isHexObjectId(user)) {
-        match.user = new mongoose.Types.ObjectId(user);
-      } else {
-        const u = await User.findOne({ $or: [{ name: user }, { email: user }] }).select("_id").lean();
-        if (u) match.user = u._id;
+      const dateRange = parseDateRange(from, to);
+      if (Object.keys(dateRange).length > 0) {
+        match.date = dateRange;
       }
     }
 
-    if (project && isHexObjectId(project)) {
-      match.project = new mongoose.Types.ObjectId(project);
-    }
+    const userFilter = await resolveUserFilter(user);
+    Object.assign(match, userFilter);
 
-    if (company || category) {
-      const projFilter = {};
-      if (company && isHexObjectId(company)) projFilter.company = company;
-      if (category && isHexObjectId(category)) projFilter.category = category;
-      const matched = await Project.find(projFilter).select("_id").lean();
-      const projIds = matched.map((p) => p._id);
-      match.project = match.project
-        ? { $in: [match.project].filter((id) => projIds.some((p) => p.equals(id))) }
-        : { $in: projIds };
-    }
+    const projFilter = await resolveProjectFilter({ project, company, category });
+    Object.assign(match, projFilter);
 
     if (taskType) {
       match.taskType = taskType;
@@ -104,7 +199,7 @@ router.get("/summary", requireAuth, requireRole("admin"), async (req, res) => {
           { path: "category", select: "name" },
         ],
       })
-      .populate("user", "name email")
+      .populate("user", "name email status")
       .lean();
 
     const groups = new Map();
@@ -129,7 +224,7 @@ router.get("/summary", requireAuth, requireRole("admin"), async (req, res) => {
       } else {
         // default: "project"
         key = s.project?._id?.toString() || (s.customTask ? `custom_${s.customTask}` : "general");
-        label = s.project?.name || (s.customTask ? `(Custom) ${s.customTask}` : "General Project");
+        label = s.project?.name || (s.customTask ? `(Custom) ${s.customTask}` : (s.taskTitle ? `(Task) ${s.taskTitle}` : "General Project"));
       }
 
       if (!groups.has(key)) {
@@ -174,18 +269,17 @@ router.get("/user-breakdown", requireAuth, requireRole("admin"), async (req, res
     if (!user) return res.status(400).json({ error: "user is required" });
 
     const match = {};
-    if (user === "unknown") {
-      match.$or = [{ user: null }, { user: { $exists: false } }];
-    } else if (isHexObjectId(user)) {
-      match.user = new mongoose.Types.ObjectId(user);
-    } else {
-      const u = await User.findOne({ $or: [{ name: user }, { email: user }] }).select("_id").lean();
-      if (!u) return res.status(400).json({ error: `User not found: ${user}` });
-      match.user = u._id;
+    const userFilter = await resolveUserFilter(user);
+    if (!userFilter.user && !userFilter.$or) {
+      return res.status(400).json({ error: `User not found: ${user}` });
     }
+    Object.assign(match, userFilter);
 
     if (from || to) {
-      match.date = parseDateRange(from, to);
+      const dateRange = parseDateRange(from, to);
+      if (Object.keys(dateRange).length > 0) {
+        match.date = dateRange;
+      }
     }
 
     const sessions = await WorkSession.find(match)
@@ -204,7 +298,7 @@ router.get("/user-breakdown", requireAuth, requireRole("admin"), async (req, res
     for (const s of sessions) {
       const hours = calculateSessionHours(s);
       const key = s.project?._id?.toString() || (s.customTask ? `custom_${s.customTask}` : "general");
-      const projectName = s.project?.name || (s.customTask ? `(Custom) ${s.customTask}` : "General Project");
+      const projectName = s.project?.name || (s.customTask ? `(Custom) ${s.customTask}` : (s.taskTitle ? `(Task) ${s.taskTitle}` : "General Project"));
       const companyName = s.project?.company?.name || "—";
       const categoryName = s.project?.category?.name || "—";
 
@@ -251,38 +345,21 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
     const { company, category, project, user, from, to, taskType } = req.query;
 
     const q = {};
-    if (user) {
-      if (user === "unknown") {
-        q.$or = [{ user: null }, { user: { $exists: false } }];
-      } else if (isHexObjectId(user)) {
-        q.user = new mongoose.Types.ObjectId(user);
-      } else {
-        const u = await User.findOne({ $or: [{ name: user }, { email: user }] }).select("_id").lean();
-        if (u) q.user = u._id;
-      }
-    }
+    const userFilter = await resolveUserFilter(user);
+    Object.assign(q, userFilter);
 
-    if (project && isHexObjectId(project)) {
-      q.project = new mongoose.Types.ObjectId(project);
-    }
-
-    if (company || category) {
-      const projFilter = {};
-      if (company && isHexObjectId(company)) projFilter.company = company;
-      if (category && isHexObjectId(category)) projFilter.category = category;
-      const matched = await Project.find(projFilter).select("_id").lean();
-      const projIds = matched.map((p) => p._id);
-      q.project = q.project
-        ? { $in: [q.project].filter((id) => projIds.some((p) => p.equals(id))) }
-        : { $in: projIds };
-    }
+    const projFilter = await resolveProjectFilter({ project, company, category });
+    Object.assign(q, projFilter);
 
     if (taskType) {
       q.taskType = taskType;
     }
 
     if (from || to) {
-      q.date = parseDateRange(from, to);
+      const dateRange = parseDateRange(from, to);
+      if (Object.keys(dateRange).length > 0) {
+        q.date = dateRange;
+      }
     }
 
     const items = await WorkSession.find(q)
@@ -317,7 +394,7 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
         s.user?.name || "Unknown",
         s.project?.company?.name || "—",
         s.project?.category?.name || "—",
-        s.project?.name || s.customTask || "—",
+        s.project?.name || s.customTask || s.taskTitle || "—",
         s.taskType || "",
         String(hours),
         s.remarks || "",

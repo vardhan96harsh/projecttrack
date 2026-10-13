@@ -7,21 +7,30 @@ import { requireAuth, requireRole } from "../middleware/auth.js";
 const router = express.Router();
 
 router.get("/", requireAuth, requireRole("admin"), async (req, res) => {
-  const users = await User.find()
+  const { status } = req.query;
+  const filter = {};
+  if (status === "active") {
+    filter.status = { $ne: "inactive" };
+  } else if (status === "inactive") {
+    filter.status = "inactive";
+  } else if (status && status !== "all") {
+    filter.status = status;
+  }
+
+  const users = await User.find(filter)
     .collation({ locale: "en", strength: 2 })
     .sort({ name: 1 });
   res.json(users.map(u => ({
+    _id: u._id,
     id: u._id,
     name: u.name,
     email: u.email,
     role: u.role,
-    status: u.status,
+    status: u.status || "active",
     gender: u.gender,
     designation: u.designation,
     dob: u.dob
-
   })));
-
 });
 
 router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
@@ -99,9 +108,9 @@ router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
 router.get("/birthdays/today", requireAuth, async (req, res) => {
   try {
     const users = await User.find({
-      status: "active",
+      status: { $ne: "inactive" },
       dob: { $ne: null },
-    }).select("name dob");
+    }).select("name dob status");
 
     const today = new Date();
     const localMonth = today.getMonth();
@@ -110,14 +119,13 @@ router.get("/birthdays/today", requireAuth, async (req, res) => {
     const utcDay = today.getUTCDate();
 
     const birthdays = users.filter((u) => {
-      if (!u.dob) return false;
+      if (!u.dob || u.status === "inactive") return false;
       const d = new Date(u.dob);
       if (isNaN(d.getTime())) return false;
       // Match against local server date OR UTC date to handle timezone boundary cases
       const matchesLocal = d.getMonth() === localMonth && d.getDate() === localDay;
       const matchesUTC = d.getUTCMonth() === utcMonth && d.getUTCDate() === utcDay;
       return matchesLocal || matchesUTC;
-
     });
 
     res.json(

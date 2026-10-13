@@ -401,7 +401,7 @@ router.post("/:id/approve", requireAuth, async (req, res) => {
 
     await session.save();
 
-    res.json({ success: true });
+    res.json({ success: true, remark });
   } catch (err) {
     console.error("APPROVE MANUAL REMARK ERROR:", err);
     res.status(500).json({ error: err.message || "Failed to approve request" });

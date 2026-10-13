@@ -17,6 +17,8 @@ import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
 import { autoStopAbandonedSessions } from "./cron/autoStopSessions.js";
 import holidayRoutes from "./routes/holidays.js";
+import projectPlanRoutes from "./routes/projectPlans.js";
+import taskRoutes from "./routes/tasks.js";
 
 dotenv.config();
 
@@ -67,6 +69,8 @@ app.use("/api/machines", machinesRouter);
 app.use("/api/work-sessions", workSessionsRouter);
 app.use("/api/manual-remarks", manualRemarkRoutes);
 app.use("/api/holidays", holidayRoutes);
+app.use("/api/project-plans", projectPlanRoutes);
+app.use("/api/tasks", taskRoutes);
 
 const PORT = process.env.PORT || 3001;
 const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";

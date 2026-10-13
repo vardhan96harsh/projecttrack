@@ -23,10 +23,16 @@ export const requireAuth = async (req, res, next) => {
     return res.status(401).json({ error: "Invalid token", code: "INVALID_TOKEN" });
   }
 
-  // 🔵 Try DB lookup, but don't fail if DB hiccups
+  // 🔵 Try DB lookup and verify active status
   let user = null;
   try {
-    user = await User.findById(payload.id).select("_id name email role");
+    user = await User.findById(payload.id).select("_id name email role status");
+    if (!user) {
+      return res.status(401).json({ error: "User no longer exists", code: "USER_NOT_FOUND" });
+    }
+    if (user.status === "inactive") {
+      return res.status(403).json({ error: "Account is inactive", code: "USER_INACTIVE" });
+    }
   } catch (err) {
     console.error("DB lookup failed:", err.message);
   }
