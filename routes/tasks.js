@@ -121,7 +121,8 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
     const isAssigned = (task.assignedTo || []).some(
       (id) => (id?._id || id)?.toString() === (req.user._id || req.user.id)?.toString()
     );
-    if (req.user.role !== "admin" && !isAssigned) {
+    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    if (!isAdmin && !isAssigned) {
       return res.status(403).json({ error: "Not authorized to update this task" });
     }
 

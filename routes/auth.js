@@ -7,7 +7,7 @@ const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev";
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || (JWT_SECRET + "_refresh");
-const ACCESS_TOKEN_EXPIRES = process.env.JWT_ACCESS_EXPIRES || "2h";
+const ACCESS_TOKEN_EXPIRES = process.env.JWT_ACCESS_EXPIRES || "24h";
 const REFRESH_TOKEN_EXPIRES = process.env.JWT_REFRESH_EXPIRES || "90d";
 
 export function generateTokens(user) {
@@ -57,7 +57,7 @@ router.post("/login", async (req, res) => {
     return res.json({
       token,
       refreshToken,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, employeeId: user.employeeId || null },
     });
   } catch (err) {
     console.error("Login error:", err);

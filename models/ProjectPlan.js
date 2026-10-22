@@ -30,6 +30,10 @@ const projectPlanSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    startPhaseName: {
+      type: String,
+      default: null,
+    },
     startDate: {
       type: String,
       default: () => new Date().toISOString().slice(0, 10),
@@ -49,6 +53,10 @@ const projectPlanSchema = new mongoose.Schema(
     parallelPipelining: {
       type: Boolean,
       default: true,
+    },
+    includeHld: {
+      type: Boolean,
+      default: false,
     },
     totalWorkingDays: {
       type: Number,

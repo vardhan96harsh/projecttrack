@@ -23,6 +23,7 @@ const workSessionSchema = new mongoose.Schema(
     segments: [segmentSchema],
     accumulatedMinutes: { type: Number, default: 0 }, // float minutes
     currentStart: Date,
+    pausedAt: { type: Date, default: null },
     remarks: String,
     customTask: { type: String, default: null },
     // 🔹 Work type for this session

@@ -48,8 +48,32 @@ export const requireAuth = async (req, res, next) => {
 };
 
 export const requireRole = (role) => (req, res, next) => {
-  if (!req.user || req.user.role !== role) {
+  if (!req.user) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  // Super Admin can perform ALL admin tasks and operations
+  if (req.user.role === "superadmin") {
+    return next();
+  }
+
+  if (role === "admin" && (req.user.role === "admin" || req.user.role === "superadmin")) {
+    return next();
+  }
+
+  if (req.user.role !== role) {
     return res.status(403).json({ error: "Forbidden" });
+  }
+
+  next();
+};
+
+export const requireSuperAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  if (req.user.role !== "superadmin") {
+    return res.status(403).json({ error: "Forbidden: Super Admin access required" });
   }
   next();
 };

@@ -164,7 +164,8 @@ router.delete("/:id", requireAuth, async (req, res) => {
    ADMIN ROUTE (ALL USERS)
    ===================================================== */
 router.get("/admin/pending-count", requireAuth, async (req, res) => {
-  if (req.user.role !== "admin") {
+  const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+  if (!isAdmin) {
     return res.status(403).json({ error: "Access denied" });
   }
   try {
@@ -178,7 +179,8 @@ router.get("/admin/pending-count", requireAuth, async (req, res) => {
 
 router.get("/admin", requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
+    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    if (!isAdmin) {
       return res.status(403).json({ error: "Access denied" });
     }
 
@@ -234,7 +236,8 @@ router.get("/admin", requireAuth, async (req, res) => {
 // UPDATE requested minutes (ADMIN – pending OR approved)
 router.put("/:id/update-minutes", requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
+    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    if (!isAdmin) {
       return res.status(403).json({ error: "Admin only" });
     }
 
@@ -300,7 +303,8 @@ router.put("/:id/update-minutes", requireAuth, async (req, res) => {
 // APPROVE manual time request
 router.post("/:id/approve", requireAuth, async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
+    const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+    if (!isAdmin) {
       return res.status(403).json({ error: "Admin only" });
     }
 
@@ -414,7 +418,8 @@ router.post(
   requireAuth,
   async (req, res) => {
     try {
-      if (req.user.role !== "admin") {
+      const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+      if (!isAdmin) {
         return res.status(403).json({ error: "Admin only" });
       }
 

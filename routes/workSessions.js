@@ -19,6 +19,63 @@ function ymd(d = new Date()) {
 }
 function isValidObjectId(v) { return mongoose.Types.ObjectId.isValid(v); }
 
+const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
+
+/**
+ * Calculates effective pause duration in minutes excluding lunch break (2:00 PM to 3:00 PM IST / 14:00 - 15:00 IST).
+ * Any pause overlap between 14:00:00 and 15:00:00 IST is deducted so lunch is not counted as unauthorized pause.
+ * 🔒 Timezone-independent: works consistently whether server runs in UTC, IST, or any other timezone.
+ */
+function calculatePauseDurationExcludingLunch(startInput, endInput) {
+  if (!startInput || !endInput) {
+    return { totalMinutes: 0, lunchOverlapMinutes: 0, pauseMinutes: 0, wasDuringLunch: false };
+  }
+
+  const startDate = new Date(startInput);
+  const endDate = new Date(endInput);
+
+  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || endDate <= startDate) {
+    return { totalMinutes: 0, lunchOverlapMinutes: 0, pauseMinutes: 0, wasDuringLunch: false };
+  }
+
+  const totalMs = endDate.getTime() - startDate.getTime();
+  let lunchOverlapMs = 0;
+
+  // Convert to IST timeline for day iteration
+  const istStart = new Date(startDate.getTime() + IST_OFFSET_MS);
+  const istEnd = new Date(endDate.getTime() + IST_OFFSET_MS);
+
+  let curDayUtc = Date.UTC(istStart.getUTCFullYear(), istStart.getUTCMonth(), istStart.getUTCDate());
+  const lastDayUtc = Date.UTC(istEnd.getUTCFullYear(), istEnd.getUTCMonth(), istEnd.getUTCDate());
+
+  while (curDayUtc <= lastDayUtc) {
+    // 14:00:00 to 15:00:00 IST in epoch ms
+    const lunchStartMs = curDayUtc + 14 * 3600 * 1000 - IST_OFFSET_MS;
+    const lunchEndMs = curDayUtc + 15 * 3600 * 1000 - IST_OFFSET_MS;
+
+    const overlapStart = Math.max(startDate.getTime(), lunchStartMs);
+    const overlapEnd = Math.min(endDate.getTime(), lunchEndMs);
+
+    if (overlapEnd > overlapStart) {
+      lunchOverlapMs += (overlapEnd - overlapStart);
+    }
+
+    curDayUtc += 24 * 3600 * 1000;
+  }
+
+  const effectiveMs = Math.max(0, totalMs - lunchOverlapMs);
+  const totalMinutes = round2(totalMs / 60000);
+  const lunchOverlapMinutes = round2(lunchOverlapMs / 60000);
+  const pauseMinutes = round2(effectiveMs / 60000);
+
+  return {
+    totalMinutes,
+    lunchOverlapMinutes,
+    pauseMinutes,
+    wasDuringLunch: lunchOverlapMinutes > 0,
+  };
+}
+
 /* ---------------------------- EMPLOYEE ACTIONS ----------------------------- */
 // GET /api/work-sessions/work-types
 router.get("/work-types", requireAuth, async (req, res) => {
@@ -53,25 +110,27 @@ router.post("/start", requireAuth, async (req, res) => {
 
   const todayStr = ymd(new Date());
 
-  // 🔹 1) Auto-stop any old active sessions from previous days
+  // 🔹 1) Auto-stop any old active OR paused sessions from previous days
   try {
     const staleSessions = await WorkSession.find({
       user: req.user._id,
-      status: "active",
+      status: { $in: ["active", "paused"] },
       date: { $ne: todayStr },
     });
 
     const now = new Date();
     for (const s of staleSessions) {
-      const end = s.lastHeartbeatAt || now;
+      const end = s.pausedAt || s.lastHeartbeatAt || now;
       if (s.currentStart) {
-        s.segments.push({ start: s.currentStart, end });
+        s.segments.push({ start: s.currentStart, end, source: "auto-stop-new-day" });
         const ms = end.getTime() - new Date(s.currentStart).getTime();
         s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
         s.currentStart = null;
       }
       s.status = "stopped";
-      s.remarks = s.remarks ? `${s.remarks} | Auto-closed on new day` : "Auto-closed on new day";
+      if (!s.remarks?.includes("Auto-closed on new day")) {
+        s.remarks = s.remarks ? `${s.remarks} | Auto-closed on new day` : "Auto-closed on new day";
+      }
       await s.save();
     }
   } catch (err) {
@@ -117,6 +176,10 @@ router.post("/start", requireAuth, async (req, res) => {
 
     // If it's already the exact same task running, just return it
     if (isSameProject && isSameTask && isSameCustom && isSameType) {
+      let liveTotal = existingActive.accumulatedMinutes || 0;
+      if (existingActive.currentStart) {
+        liveTotal += Math.max(0, (Date.now() - new Date(existingActive.currentStart).getTime()) / 60000);
+      }
       return res.json({
         ...existingActive.toObject(),
         projectId: project ? project._id : null,
@@ -126,21 +189,36 @@ router.post("/start", requireAuth, async (req, res) => {
         customTask: existingActive.customTask || null,
         companyName: project?.company?.name || "—",
         categoryName: project?.category?.name || "—",
-        totalMinutes: round2(existingActive.accumulatedMinutes || 0),
+        totalMinutes: round2(liveTotal),
       });
     }
 
-    // Otherwise, auto-pause the previous active session so user can switch seamlessly!
-    const now = new Date();
-    if (existingActive.currentStart) {
-      existingActive.segments.push({ start: existingActive.currentStart, end: now });
-      const ms = now - new Date(existingActive.currentStart);
-      existingActive.accumulatedMinutes = (existingActive.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
-      existingActive.currentStart = null;
+    // If previous active session is from a past day, close it properly!
+    if (existingActive.date && existingActive.date < todayStr) {
+      const end = existingActive.lastHeartbeatAt || (existingActive.currentStart ? new Date(new Date(existingActive.currentStart).getTime() + 15 * 60 * 1000) : new Date());
+      if (existingActive.currentStart) {
+        existingActive.segments.push({ start: existingActive.currentStart, end, source: "auto-stop-day-end" });
+        const ms = end.getTime() - new Date(existingActive.currentStart).getTime();
+        existingActive.accumulatedMinutes = (existingActive.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        existingActive.currentStart = null;
+      }
+      existingActive.status = "stopped";
+      existingActive.remarks = existingActive.remarks ? `${existingActive.remarks} | Auto-closed on day-end` : "Auto-closed on day-end";
+      await existingActive.save();
+    } else {
+      // Otherwise, auto-pause the previous active session so user can switch seamlessly!
+      const now = new Date();
+      if (existingActive.currentStart) {
+        existingActive.segments.push({ start: existingActive.currentStart, end: now });
+        const ms = now - new Date(existingActive.currentStart);
+        existingActive.accumulatedMinutes = (existingActive.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        existingActive.currentStart = null;
+      }
+      existingActive.status = "paused";
+      existingActive.pausedAt = now;
+      await existingActive.save();
+      console.log("⏸️ Auto-paused previous session to switch:", existingActive._id);
     }
-    existingActive.status = "paused";
-    await existingActive.save();
-    console.log("⏸️ Auto-paused previous session to switch:", existingActive._id);
   }
 
   // 🔹 3) Check if user has an existing PAUSED session for this EXACT project/task today:
@@ -157,6 +235,7 @@ router.post("/start", requireAuth, async (req, res) => {
 
   if (matchingPaused) {
     matchingPaused.status = "active";
+    matchingPaused.pausedAt = null;
     matchingPaused.currentStart = new Date();
     matchingPaused.lastHeartbeatAt = new Date();
     matchingPaused.taskType = chosenType;
@@ -216,23 +295,39 @@ router.post("/start", requireAuth, async (req, res) => {
 
 // POST /api/work-sessions/pause
 router.post("/pause", requireAuth, async (req, res) => {
-  const { machineId, machineInfo } = req.body || {};
-  const session = await WorkSession.findOne({ user: req.user._id, status: "active" }).sort({ createdAt: -1 });
-  if (!session) return res.status(404).json({ error: "No active session found." });
+  const { machineId, machineInfo, sessionId } = req.body || {};
+  let session = null;
+  if (sessionId && isValidObjectId(sessionId)) {
+    session = await WorkSession.findOne({ _id: sessionId, user: req.user._id });
+  }
+  if (!session) {
+    session = await WorkSession.findOne({ user: req.user._id, status: "active" }).sort({ createdAt: -1 });
+  }
+
+  // Idempotent: If session is already paused, return it safely without 404
+  if (!session) {
+    const alreadyPaused = await WorkSession.findOne({ user: req.user._id, status: "paused" }).sort({ createdAt: -1 });
+    if (alreadyPaused) {
+      return res.json({ ...alreadyPaused.toObject(), totalMinutes: round2(alreadyPaused.accumulatedMinutes || 0) });
+    }
+    return res.status(404).json({ error: "No active session found." });
+  }
+
+  if (session.status === "paused") {
+    return res.json({ ...session.toObject(), totalMinutes: round2(session.accumulatedMinutes || 0) });
+  }
 
   const now = new Date();
-  if (!session.currentStart) return res.status(400).json({ error: "No running segment to pause." });
+  if (session.currentStart) {
+    session.segments.push({ start: session.currentStart, end: now });
+    const ms = now - new Date(session.currentStart);
+    const minutes = ms > 0 ? (ms / 60000) : 0;
+    session.accumulatedMinutes = (session.accumulatedMinutes || 0) + minutes;
+    session.currentStart = null;
+  }
 
-  // close segment
-  session.segments.push({ start: session.currentStart, end: now });
-
-  // add exact minutes (float)
-  const ms = now - new Date(session.currentStart);
-  const minutes = ms > 0 ? (ms / 60000) : 0;
-  session.accumulatedMinutes = (session.accumulatedMinutes || 0) + minutes;
-
-  session.currentStart = null;
   session.status = "paused";
+  session.pausedAt = now;
 
   if (machineId) session.machineId = machineId;
   if (machineInfo) session.machineInfo = machineInfo;
@@ -244,19 +339,29 @@ router.post("/pause", requireAuth, async (req, res) => {
 // POST /api/work-sessions/resume
 router.post("/resume", requireAuth, async (req, res) => {
   const { machineId, machineInfo, sessionId } = req.body || {};
+  const todayStr = ymd(new Date());
   let session = null;
   if (sessionId && isValidObjectId(sessionId)) {
     session = await WorkSession.findOne({ _id: sessionId, user: req.user._id });
   }
   if (!session) {
+    // Prefer today's paused session first
+    session = await WorkSession.findOne({ user: req.user._id, status: "paused", date: todayStr }).sort({ updatedAt: -1, createdAt: -1 });
+  }
+  if (!session) {
+    // Fallback: any paused session
     session = await WorkSession.findOne({ user: req.user._id, status: "paused" }).sort({ updatedAt: -1, createdAt: -1 });
   }
   // If the session is already active, return it immediately without error
   if (!session) {
-    const alreadyActive = await WorkSession.findOne({ user: req.user._id, status: "active" }).sort({ createdAt: -1 });
+    const alreadyActive = await WorkSession.findOne({ user: req.user._id, status: "active", date: todayStr }).sort({ createdAt: -1 });
     if (alreadyActive) {
       const proj = alreadyActive.project ? await Project.findById(alreadyActive.project).select("_id name").populate("company category", "name") : null;
       const tDoc = alreadyActive.task ? await Task.findById(alreadyActive.task) : null;
+      let total = alreadyActive.accumulatedMinutes || 0;
+      if (alreadyActive.currentStart) {
+        total += Math.max(0, (Date.now() - new Date(alreadyActive.currentStart).getTime()) / 60000);
+      }
       return res.json({
         ...alreadyActive.toObject(),
         projectId: proj ? proj._id : null,
@@ -265,7 +370,7 @@ router.post("/resume", requireAuth, async (req, res) => {
         taskTitle: alreadyActive.taskTitle || tDoc?.title || (alreadyActive.customTask || null),
         companyName: proj?.company?.name || "—",
         categoryName: proj?.category?.name || "—",
-        totalMinutes: round2(alreadyActive.accumulatedMinutes || 0),
+        totalMinutes: round2(total),
       });
     }
     return res.status(404).json({ error: "No paused session found to resume." });
@@ -275,17 +380,29 @@ router.post("/resume", requireAuth, async (req, res) => {
   const otherActive = await WorkSession.find({ user: req.user._id, status: "active", _id: { $ne: session._id } });
   const now = new Date();
   for (const s of otherActive) {
-    if (s.currentStart) {
-      s.segments.push({ start: s.currentStart, end: now });
-      const ms = now - new Date(s.currentStart);
-      s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
-      s.currentStart = null;
+    if (s.date && s.date < todayStr) {
+      const end = s.lastHeartbeatAt || (s.currentStart ? new Date(new Date(s.currentStart).getTime() + 15 * 60 * 1000) : now);
+      if (s.currentStart) {
+        s.segments.push({ start: s.currentStart, end, source: "auto-stop-day-end" });
+        const ms = end.getTime() - new Date(s.currentStart).getTime();
+        s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        s.currentStart = null;
+      }
+      s.status = "stopped";
+      s.remarks = s.remarks ? `${s.remarks} | Auto-closed on day-end` : "Auto-closed on day-end";
+      await s.save();
+    } else {
+      if (s.currentStart) {
+        s.segments.push({ start: s.currentStart, end: now });
+        const ms = now - new Date(s.currentStart);
+        s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        s.currentStart = null;
+      }
+      s.status = "paused";
+      s.pausedAt = now;
+      await s.save();
     }
-    s.status = "paused";
-    await s.save();
   }
-
-  const todayStr = ymd(new Date());
 
   // 🔹 If the paused session belongs to a PREVIOUS day, finalize it and rollover to a new session today!
   if (session.date !== todayStr) {
@@ -307,8 +424,13 @@ router.post("/resume", requireAuth, async (req, res) => {
     }).sort({ createdAt: -1 });
 
     if (todaySession) {
-      todaySession.status = "active";
-      todaySession.currentStart = new Date();
+      if (todaySession.status !== "active") {
+        todaySession.status = "active";
+        todaySession.pausedAt = null;
+        todaySession.currentStart = new Date();
+      } else if (!todaySession.currentStart) {
+        todaySession.currentStart = new Date();
+      }
       todaySession.lastHeartbeatAt = new Date();
       if (machineId) todaySession.machineId = machineId;
       if (machineInfo) todaySession.machineInfo = machineInfo;
@@ -334,8 +456,16 @@ router.post("/resume", requireAuth, async (req, res) => {
       });
     }
   } else {
-    session.status = "active";
-    session.currentStart = new Date();
+    // 🔹 Today's session:
+    // If ALREADY active, NEVER overwrite currentStart! Keep ongoing work time intact!
+    if (session.status !== "active") {
+      session.status = "active";
+      session.pausedAt = null;
+      session.currentStart = new Date();
+    } else if (!session.currentStart) {
+      session.currentStart = new Date();
+    }
+    session.pausedAt = null;
     session.lastHeartbeatAt = new Date();
 
     if (machineId) session.machineId = machineId;
@@ -347,6 +477,11 @@ router.post("/resume", requireAuth, async (req, res) => {
   const project = session.project ? await Project.findById(session.project).select("_id name").populate("company category", "name") : null;
   const taskDoc = session.task ? await Task.findById(session.task) : null;
 
+  let totalMinutes = session.accumulatedMinutes || 0;
+  if (session.status === "active" && session.currentStart) {
+    totalMinutes += Math.max(0, (Date.now() - new Date(session.currentStart).getTime()) / 60000);
+  }
+
   res.json({
     ...session.toObject(),
     projectId: project ? project._id : null,
@@ -355,7 +490,7 @@ router.post("/resume", requireAuth, async (req, res) => {
     taskTitle: session.taskTitle || taskDoc?.title || (session.customTask || null),
     companyName: project?.company?.name || "—",
     categoryName: project?.category?.name || "—",
-    totalMinutes: round2(session.accumulatedMinutes || 0),
+    totalMinutes: round2(totalMinutes),
   });
 });
 
@@ -380,6 +515,7 @@ router.post("/stop", requireAuth, async (req, res) => {
   }
 
   session.status = "stopped";
+  session.pausedAt = null;
   if (remarks) {
     session.remarks = session.remarks ? `${session.remarks} | ${remarks}` : remarks;
   }
@@ -394,6 +530,27 @@ router.post("/stop", requireAuth, async (req, res) => {
 // GET /api/work-sessions/my
 router.get("/my", requireAuth, async (req, res) => {
   const { from, to } = req.query;
+  const todayStr = ymd(new Date());
+
+  // Proactively finalize any abandoned active or paused sessions from previous days for this employee
+  try {
+    await WorkSession.updateMany(
+      {
+        user: req.user._id,
+        status: { $in: ["active", "paused"] },
+        date: { $lt: todayStr },
+      },
+      {
+        $set: {
+          status: "stopped",
+          currentStart: null,
+        },
+      }
+    );
+  } catch (err) {
+    console.warn("Could not auto-close past sessions on GET /my:", err.message);
+  }
+
   const q = { user: req.user._id };
 
   if (from || to) {
@@ -401,7 +558,7 @@ router.get("/my", requireAuth, async (req, res) => {
     if (from) q.date.$gte = from;
     if (to) q.date.$lte = to;
   } else {
-    q.date = ymd(new Date());
+    q.date = todayStr;
   }
 
   const rows = await WorkSession.find(q)
@@ -721,6 +878,171 @@ router.post("/sync-offline", requireAuth, async (req, res) => {
 });
 
 
+/* ------------------------ ADMIN LIVE USER STATUS ---------------------------
+   GET /api/work-sessions/admin/live-status
+   Returns real-time list of all employees and their tracker usage status for today:
+   - Online (Active working / Paused)
+   - Offline (Completed shift / Not started today)
+----------------------------------------------------------------------------- */
+router.get("/admin/live-status", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const todayStr = ymd(new Date());
+
+    // 1. Fetch all active employees (excluding admin and superadmin accounts)
+    const employees = await User.find({
+      status: { $ne: "inactive" },
+      role: { $nin: ["admin", "superadmin"] },
+    })
+      .select("_id name email employeeId designation role gender")
+      .collation({ locale: "en", strength: 2 })
+      .sort({ name: 1 })
+      .lean();
+
+    // 2. Fetch today's work sessions
+    const sessions = await WorkSession.find({ date: todayStr })
+      .populate({
+        path: "project",
+        select: "name category company",
+        populate: [
+          { path: "company", select: "name" },
+          { path: "category", select: "name" },
+        ],
+      })
+      .populate("task", "title taskType status")
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .lean();
+
+    // 3. Group sessions by user
+    const sessionsByUser = new Map();
+    for (const s of sessions) {
+      const uId = String(s.user);
+      if (!sessionsByUser.has(uId)) {
+        sessionsByUser.set(uId, []);
+      }
+      sessionsByUser.get(uId).push(s);
+    }
+
+    let onlineCount = 0;
+    let activeCount = 0;
+    let pausedCount = 0;
+    let offlineCount = 0;
+    let totalTrackedMinutesToday = 0;
+
+    const userStatuses = employees.map((emp) => {
+      const uId = String(emp._id);
+      const userSessions = sessionsByUser.get(uId) || [];
+
+      // Calculate total minutes worked today
+      let todayMinutes = 0;
+      for (const s of userSessions) {
+        let accMins = s.accumulatedMinutes ?? 0;
+        if (accMins > 1440 && Array.isArray(s.segments) && s.segments.length > 0) {
+          let segMs = 0;
+          for (const seg of s.segments) {
+            if (seg.start && seg.end) {
+              const st = new Date(seg.start).getTime();
+              const et = new Date(seg.end).getTime();
+              if (et > st) segMs += (et - st);
+            }
+          }
+          accMins = Math.min(1440, round2(segMs / 60000));
+        }
+        let sessionTotal = accMins;
+        if (s.status === "active" && s.currentStart) {
+          sessionTotal += Math.max(0, (Date.now() - new Date(s.currentStart).getTime()) / 60000);
+        }
+        todayMinutes += sessionTotal;
+      }
+      todayMinutes = round2(todayMinutes);
+      totalTrackedMinutesToday += todayMinutes;
+
+      // Find current active session or paused session
+      const runningSession = userSessions.find((s) => s.status === "active");
+      const pausedSession = !runningSession ? userSessions.find((s) => s.status === "paused") : null;
+      const latestSession = runningSession || pausedSession || (userSessions.length > 0 ? userSessions[0] : null);
+
+      let status = "offline_not_started";
+      let isOnline = false;
+
+      if (runningSession) {
+        status = "active";
+        isOnline = true;
+        onlineCount++;
+        activeCount++;
+      } else if (pausedSession) {
+        status = "paused";
+        isOnline = true;
+        onlineCount++;
+        pausedCount++;
+      } else if (userSessions.length > 0) {
+        status = "offline_completed";
+        offlineCount++;
+      } else {
+        status = "offline_not_started";
+        offlineCount++;
+      }
+
+      let currentSessionData = null;
+      if (latestSession) {
+        let liveDuration = latestSession.accumulatedMinutes || 0;
+        if (latestSession.status === "active" && latestSession.currentStart) {
+          liveDuration += Math.max(0, (Date.now() - new Date(latestSession.currentStart).getTime()) / 60000);
+        }
+
+        currentSessionData = {
+          _id: latestSession._id,
+          status: latestSession.status,
+          projectId: latestSession.project?._id || null,
+          projectName: latestSession.project?.name || (latestSession.customTask || "—"),
+          companyName: latestSession.project?.company?.name || "—",
+          categoryName: latestSession.project?.category?.name || "—",
+          taskId: latestSession.task?._id || latestSession.task || null,
+          taskTitle: latestSession.task?.title || latestSession.taskTitle || latestSession.customTask || null,
+          customTask: latestSession.customTask || null,
+          currentStart: latestSession.currentStart || null,
+          pausedAt: latestSession.pausedAt || null,
+          lastHeartbeatAt: latestSession.lastHeartbeatAt || null,
+          machineId: latestSession.machineId || null,
+          machineInfo: latestSession.machineInfo || null,
+          sessionMinutes: round2(liveDuration),
+        };
+      }
+
+      return {
+        userId: emp._id,
+        name: emp.name,
+        email: emp.email,
+        employeeId: emp.employeeId || "—",
+        designation: emp.designation || "Employee",
+        role: emp.role,
+        isOnline,
+        status, // "active" | "paused" | "offline_completed" | "offline_not_started"
+        currentSession: currentSessionData,
+        todaySessionsCount: userSessions.length,
+        todayTotalMinutes: todayMinutes,
+        lastHeartbeatAt: latestSession?.lastHeartbeatAt || latestSession?.currentStart || latestSession?.updatedAt || null,
+      };
+    });
+
+    res.json({
+      success: true,
+      date: todayStr,
+      summary: {
+        totalEmployees: employees.length,
+        onlineCount,
+        activeCount,
+        pausedCount,
+        offlineCount,
+        totalTrackedHours: round2(totalTrackedMinutesToday / 60),
+      },
+      users: userStatuses,
+    });
+  } catch (err) {
+    console.error("ADMIN LIVE STATUS ERROR:", err);
+    res.status(500).json({ error: "Failed to fetch live employee status." });
+  }
+});
+
 /* ----------------------------- ADMIN LIST ---------------------------------- */
 
 router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) => {
@@ -823,7 +1145,7 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       ],
     })
     .populate("task", "title taskType status")
-    .populate({ path: "user", select: "name email" })
+    .populate({ path: "user", select: "name email employeeId designation role" })
     .sort({ createdAt: -1 })
     .lean();
 
@@ -858,6 +1180,9 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       userId: s.user?._id || null,
       userName: s.user?.name || "(unknown)",
       userEmail: s.user?.email || "",
+      userEmployeeId: s.user?.employeeId || null,
+      userDesignation: s.user?.designation || null,
+      userRole: s.user?.role || "employee",
 
       projectId: s.project?._id || null,
       projectName: s.project?.name || (s.customTask || "—"),
@@ -874,6 +1199,9 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       // expose machine in admin payload
       machineId: s.machineId || null,
       machineInfo: s.machineInfo || null,
+      pausedAt: s.pausedAt || null,
+      currentStart: s.currentStart || null,
+      lastHeartbeatAt: s.lastHeartbeatAt || null,
     };
   });
 
@@ -1162,6 +1490,299 @@ router.get("/export", requireAuth, requireRole("admin"), async (req, res) => {
   res.send(csv);
 });
 
+// 🔔 GET /api/work-sessions/admin/paused-alerts
+// Returns active notifications for Admin & Super Admin when employee sessions are paused >= 10 minutes
+router.get("/admin/paused-alerts", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const minMinutes = Math.max(1, Number(req.query.minMinutes) || 10);
+    const todayStr = ymd(new Date());
 
+    // 1. Find user IDs who currently have an active session running today
+    const activeSessions = await WorkSession.find({
+      date: todayStr,
+      status: "active",
+    }).select("user");
+    const activeUserIds = new Set(activeSessions.map((s) => String(s.user)));
+
+    // 2. Query paused sessions for today
+    const pausedSessions = await WorkSession.find({
+      date: todayStr,
+      status: "paused",
+    })
+      .populate("user", "name email employeeId designation role")
+      .populate("project", "name")
+      .populate("task", "title")
+      .sort({ updatedAt: -1, createdAt: -1 });
+
+    const now = new Date();
+    const alertsByUser = new Map();
+
+    for (const s of pausedSessions) {
+      if (!s.user) continue;
+      const uId = String(s.user._id);
+
+      // If this employee is actively working on another task right now, don't alert
+      if (activeUserIds.has(uId)) continue;
+
+      // Only take the most recent paused session per employee
+      if (alertsByUser.has(uId)) continue;
+
+      // Determine pause timestamp
+      let pauseDate = s.pausedAt;
+      if (!pauseDate) {
+        if (s.segments && s.segments.length > 0) {
+          const lastSeg = s.segments[s.segments.length - 1];
+          pauseDate = lastSeg.end || lastSeg.start;
+        }
+      }
+      if (!pauseDate) {
+        pauseDate = s.updatedAt || s.createdAt;
+      }
+
+      const durationInfo = calculatePauseDurationExcludingLunch(pauseDate, now);
+      const elapsedMinutes = Math.floor(durationInfo.pauseMinutes);
+
+      if (elapsedMinutes >= minMinutes) {
+        const empName = s.user.name || "Employee";
+        const projName = s.project?.name || s.customTask || "—";
+        const tTitle = s.taskTitle || s.task?.title || s.customTask || "General Task";
+
+        alertsByUser.set(uId, {
+          sessionId: s._id,
+          userId: s.user._id,
+          employeeName: empName,
+          employeeId: s.user.employeeId || "—",
+          employeeEmail: s.user.email || "",
+          designation: s.user.designation || "",
+          role: s.user.role || "employee",
+          projectName: projName,
+          taskTitle: tTitle,
+          pausedAt: pauseDate,
+          pausedMinutes: elapsedMinutes,
+          rawElapsedMinutes: Math.floor(durationInfo.totalMinutes),
+          lunchDeductedMinutes: Math.floor(durationInfo.lunchOverlapMinutes),
+          message: `${empName}'s session has been paused for ${elapsedMinutes} minutes${durationInfo.lunchOverlapMinutes > 0 ? " (excl. lunch)" : ""}${s.project?.name ? ` on ${s.project.name}` : ""}.`,
+        });
+      }
+    }
+
+    const alerts = Array.from(alertsByUser.values()).sort((a, b) => b.pausedMinutes - a.pausedMinutes);
+
+    res.json({
+      success: true,
+      count: alerts.length,
+      alerts,
+      minMinutes,
+      serverTime: now,
+    });
+  } catch (error) {
+    console.error("Error fetching paused session alerts:", error);
+    res.status(500).json({ error: "Failed to fetch paused session alerts", details: error.message });
+  }
+});
+
+// 📋 GET /api/work-sessions/admin/pause-logs
+// Prepares detailed pause logs for all pauses (1 time, 10 times, etc.) across sessions
+router.get("/admin/pause-logs", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const { date, from, to, user, project, company, category, minMinutes } = req.query;
+
+    const q = {};
+    if (date) {
+      q.date = date;
+    } else if (from || to) {
+      q.date = {};
+      if (from) q.date.$gte = from;
+      if (to) q.date.$lte = to;
+    } else {
+      q.date = ymd(new Date());
+    }
+
+    if (user && isValidObjectId(user)) {
+      q.user = new mongoose.Types.ObjectId(user);
+    }
+    if (project && isValidObjectId(project)) {
+      q.project = new mongoose.Types.ObjectId(project);
+    }
+
+    // Filter by company/category if provided
+    if (company || category) {
+      const projFilter = {};
+      if (company && isValidObjectId(company)) projFilter.company = company;
+      if (category && isValidObjectId(category)) projFilter.category = category;
+      const matchingProjects = await Project.find(projFilter).select("_id").lean();
+      const projectIds = matchingProjects.map((p) => p._id);
+      if (q.project) {
+        if (!projectIds.some((id) => id.toString() === q.project.toString())) {
+          q.project = new mongoose.Types.ObjectId();
+        }
+      } else {
+        q.project = { $in: projectIds };
+      }
+    }
+
+    const sessions = await WorkSession.find(q)
+      .populate("user", "name email employeeId designation role")
+      .populate("project", "name company category")
+      .populate("task", "title")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const minThreshold = Math.max(10, Number(minMinutes) || 10);
+    const now = new Date();
+    const allPauseLogs = [];
+    const userSummaryMap = new Map();
+
+    for (const s of sessions) {
+      if (!s.user) continue;
+
+      const uId = String(s.user._id);
+      const uName = s.user.name || "Unknown";
+      const uEmail = s.user.email || "";
+      const empId = s.user.employeeId || "—";
+      const desig = s.user.designation || "—";
+      const uRole = s.user.role || "employee";
+      const projName = s.project?.name || s.customTask || "—";
+      const tTitle = s.taskTitle || s.task?.title || s.customTask || "—";
+
+      // Initialize user summary if needed
+      if (!userSummaryMap.has(uId)) {
+        userSummaryMap.set(uId, {
+          userId: uId,
+          employeeName: uName,
+          employeeEmail: uEmail,
+          employeeId: empId,
+          designation: desig,
+          role: uRole,
+          totalPauseCount: 0,
+          totalPauseMinutes: 0,
+          maxPauseMinutes: 0,
+          isCurrentlyPaused: false,
+          logs: [],
+        });
+      }
+
+      const userSummary = userSummaryMap.get(uId);
+
+      // Process segments to find all pause intervals
+      const rawSegments = Array.isArray(s.segments) ? [...s.segments] : [];
+      // Sort segments by start time
+      rawSegments.sort((a, b) => new Date(a.start) - new Date(b.start));
+
+      let pauseIndexInSession = 1;
+
+      // 1. Pauses between completed segments
+      for (let i = 0; i < rawSegments.length - 1; i++) {
+        const segEnd = rawSegments[i]?.end ? new Date(rawSegments[i].end) : null;
+        const nextStart = rawSegments[i + 1]?.start ? new Date(rawSegments[i + 1].start) : null;
+
+        if (segEnd && nextStart && nextStart > segEnd) {
+          const durationInfo = calculatePauseDurationExcludingLunch(segEnd, nextStart);
+          const pauseMinutes = durationInfo.pauseMinutes;
+
+          // Strictly filter for pauses >= 10 minutes (excluding 2 PM - 3 PM lunch)
+          if (pauseMinutes >= minThreshold) {
+            const pauseLog = {
+              pauseId: `${s._id}_p_${i}`,
+              sessionId: s._id,
+              date: s.date,
+              userId: uId,
+              employeeName: uName,
+              employeeEmail: uEmail,
+              employeeId: empId,
+              designation: desig,
+              role: uRole,
+              projectName: projName,
+              taskTitle: tTitle,
+              pauseNumber: pauseIndexInSession++,
+              pauseStart: segEnd,
+              pauseEnd: nextStart,
+              pauseMinutes,
+              rawTotalMinutes: durationInfo.totalMinutes,
+              lunchDeductedMinutes: durationInfo.lunchOverlapMinutes,
+              isOngoing: false,
+            };
+
+            allPauseLogs.push(pauseLog);
+            userSummary.totalPauseCount += 1;
+            userSummary.totalPauseMinutes = round2(userSummary.totalPauseMinutes + pauseMinutes);
+            if (pauseMinutes > userSummary.maxPauseMinutes) {
+              userSummary.maxPauseMinutes = pauseMinutes;
+            }
+            userSummary.logs.push(pauseLog);
+          }
+        }
+      }
+
+      // 2. Ongoing pause (if session is currently paused)
+      if (s.status === "paused") {
+        let pauseStart = s.pausedAt;
+        if (!pauseStart && rawSegments.length > 0) {
+          pauseStart = rawSegments[rawSegments.length - 1].end || rawSegments[rawSegments.length - 1].start;
+        }
+        if (!pauseStart) {
+          pauseStart = s.updatedAt || s.createdAt;
+        }
+
+        const durationInfo = calculatePauseDurationExcludingLunch(pauseStart, now);
+        const pauseMinutes = durationInfo.pauseMinutes;
+
+        // Strictly filter for pauses >= 10 minutes (excluding 2 PM - 3 PM lunch)
+        if (pauseMinutes >= minThreshold) {
+          const ongoingLog = {
+            pauseId: `${s._id}_ongoing`,
+            sessionId: s._id,
+            date: s.date,
+            userId: uId,
+            employeeName: uName,
+            employeeEmail: uEmail,
+            employeeId: empId,
+            designation: desig,
+            role: uRole,
+            projectName: projName,
+            taskTitle: tTitle,
+            pauseNumber: pauseIndexInSession++,
+            pauseStart: new Date(pauseStart),
+            pauseEnd: null, // ongoing
+            pauseMinutes,
+            rawTotalMinutes: durationInfo.totalMinutes,
+            lunchDeductedMinutes: durationInfo.lunchOverlapMinutes,
+            isOngoing: true,
+          };
+
+          allPauseLogs.push(ongoingLog);
+          userSummary.totalPauseCount += 1;
+          userSummary.totalPauseMinutes = round2(userSummary.totalPauseMinutes + pauseMinutes);
+          if (pauseMinutes > userSummary.maxPauseMinutes) {
+            userSummary.maxPauseMinutes = pauseMinutes;
+          }
+          userSummary.isCurrentlyPaused = true;
+          userSummary.logs.push(ongoingLog);
+        }
+      }
+    }
+
+    // Sort logs chronologically descending (newest pause first)
+    allPauseLogs.sort((a, b) => new Date(b.pauseStart) - new Date(a.pauseStart));
+
+    // Convert user summary map to array sorted by total pause minutes descending
+    const userSummaries = Array.from(userSummaryMap.values())
+      .filter((u) => u.totalPauseCount > 0)
+      .sort((a, b) => b.totalPauseMinutes - a.totalPauseMinutes);
+
+    res.json({
+      success: true,
+      count: allPauseLogs.length,
+      logs: allPauseLogs,
+      userSummaries,
+      minThreshold,
+      lunchWindow: { start: "14:00", end: "15:00", description: "Lunch time (2:00 PM - 3:00 PM) excluded from pauses" },
+      serverTime: now,
+    });
+  } catch (error) {
+    console.error("Error generating pause logs:", error);
+    res.status(500).json({ error: "Failed to generate pause logs", details: error.message });
+  }
+});
 
 export default router;
