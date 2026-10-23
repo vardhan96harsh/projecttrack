@@ -80,48 +80,34 @@ async function run() {
     const containsInactive = bdays.some((b) => b.id === inactiveUser._id || b.name === inactiveUser.name);
     assert(!containsInactive, "Today birthdays strictly excludes inactive users");
 
-    // 5. Active Employee Login
-    const usersRes = await fetch(`${BASE}/api/users?status=all`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+    // 5. Create Dedicated Test Employee (Never touch or mutate real employee data)
+    const testEmployeeEmail = `test_employee_${Date.now()}@e2e-audit.test`;
+    const createEmpRes = await fetch(`${BASE}/api/users`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${adminToken}`,
+      },
+      body: JSON.stringify({
+        name: "E2E Audit Test Employee",
+        email: testEmployeeEmail,
+        password: "password123",
+        role: "employee",
+        status: "active",
+        dob: new Date("1995-05-15").toISOString(),
+      }),
     });
-    const usersData = await usersRes.json();
-    const allUsers = Array.isArray(usersData) ? usersData : [];
-    let activeEmployee = allUsers.find((u) => u.role !== "admin" && u.status !== "inactive");
-    let employeeToken = null;
+    const activeEmployee = await createEmpRes.json();
+    assert(activeEmployee && (activeEmployee._id || activeEmployee.id), "Dedicated test employee created");
 
-    if (activeEmployee) {
-      // Try login with standard password, or reset password if needed
-      let empLogin = await fetch(`${BASE}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: activeEmployee.email, password: "password123" }),
-      });
-      if (empLogin.status !== 200) {
-        // Reset password to password123
-        await fetch(`${BASE}/api/users/${activeEmployee.id || activeEmployee._id}`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${adminToken}`,
-          },
-          body: JSON.stringify({
-            name: activeEmployee.name,
-            email: activeEmployee.email,
-            role: "employee",
-            status: "active",
-            password: "password123",
-          }),
-        });
-        empLogin = await fetch(`${BASE}/api/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: activeEmployee.email, password: "password123" }),
-        });
-      }
-      const empAuth = await empLogin.json();
-      employeeToken = empAuth.token;
-      assert(empLogin.status === 200 && employeeToken, "Active employee authenticated");
-    }
+    const empLogin = await fetch(`${BASE}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: testEmployeeEmail, password: "password123" }),
+    });
+    const empAuth = await empLogin.json();
+    const employeeToken = empAuth.token;
+    assert(empLogin.status === 200 && employeeToken, "Dedicated test employee authenticated");
 
     // 6. Companies & Projects
     const compRes = await fetch(`${BASE}/api/companies`, {
@@ -425,6 +411,23 @@ async function run() {
 
     assert(remainingT1 && remainingT1.status === "completed", "Completed task was safely preserved after plan deletion");
     assert(!remainingT2, "Uncompleted/pending task was cleanly removed after plan deletion");
+
+    // 15. Teardown: Clean up test users and test entities
+    const empId = activeEmployee._id || activeEmployee.id;
+    if (empId) {
+      await fetch(`${BASE}/api/users/${empId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+    }
+    const inactiveId = inactiveUser._id || inactiveUser.id;
+    if (inactiveId) {
+      await fetch(`${BASE}/api/users/${inactiveId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${adminToken}` },
+      });
+    }
+    console.log("  ✅ PASS: Test employee and test inactive user cleaned up");
 
     console.log("=================================================");
     console.log(`🏁 AUDIT COMPLETED: ${passed} PASSED, ${failed} FAILED`);

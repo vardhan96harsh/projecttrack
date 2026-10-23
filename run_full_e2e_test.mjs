@@ -312,6 +312,9 @@ async function runFullE2ETest() {
   });
   await db.collection("tasks").deleteMany({ projectId: createdProject._id });
   await db.collection("projects").deleteOne({ _id: new mongoose.Types.ObjectId(createdProject._id) });
+  if (sessionId) {
+    await db.collection("worksessions").deleteOne({ _id: new mongoose.Types.ObjectId(sessionId) });
+  }
   console.log("   [Pass] Temporary test entities cleaned up successfully.");
 
   console.log("\n==================================================================");
