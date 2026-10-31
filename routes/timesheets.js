@@ -26,8 +26,9 @@ router.post("/", requireAuth, async (req, res) => {
 router.get("/", requireAuth, async (req, res) => {
   const { company, category, project, user, from, to, taskType } = req.query;
   const q = {};
-  if (req.user.role !== "admin") q.user = req.user._id || req.user.id;
-  if (user && req.user.role === "admin") q.user = user;
+  const isAdmin = req.user.role === "admin" || req.user.role === "superadmin";
+  if (!isAdmin) q.user = req.user._id || req.user.id;
+  if (user && isAdmin) q.user = user;
   if (company) q.company = company;
   if (category) q.category = category;
   if (project) q.project = project;
@@ -35,7 +36,11 @@ router.get("/", requireAuth, async (req, res) => {
   if (from || to) {
     q.dateLogged = {};
     if (from) q.dateLogged.$gte = new Date(from);
-    if (to) q.dateLogged.$lte = new Date(to);
+    if (to) {
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      q.dateLogged.$lte = toDate;
+    }
   }
   const items = await Timesheet.find(q)
     .populate("user", "name email role")

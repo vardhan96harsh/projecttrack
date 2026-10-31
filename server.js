@@ -17,7 +17,7 @@ import workSessionsRouter from "./routes/workSessions.js";
 import manualRemarkRoutes from "./routes/manualRemarks.js";
 import { autoStopAbandonedSessions } from "./cron/autoStopSessions.js";
 import holidayRoutes from "./routes/holidays.js";
-import projectPlanRoutes from "./routes/projectPlans.js";
+import projectPlanRoutes, { cleanseAndSyncAllProjectPlans } from "./routes/projectPlans.js";
 import taskRoutes from "./routes/tasks.js";
 
 dotenv.config();
@@ -92,37 +92,42 @@ const MONGO = process.env.MONGO_URI || "mongodb://127.0.0.1:27017/projecttrack";
 
 
 
-      mongoose
-      .connect(MONGO)
-      .then(() => {
-        console.log("✅ MongoDB connected");
+mongoose
+  .connect(MONGO)
+  .then(() => {
+    console.log("✅ MongoDB connected");
 
-        app.listen(PORT, "0.0.0.0", () => {
-          console.log("🚀 API listening on", PORT);
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log("🚀 API listening on", PORT);
 
-          // ✅ Run once immediately (optional but helpful)
-          autoStopAbandonedSessions().catch((e) =>
-            console.error("autoStop first run error:", e)
-          );
+      // ✅ Run once immediately (optional but helpful)
+      autoStopAbandonedSessions().catch((e) =>
+        console.error("autoStop first run error:", e)
+      );
 
-          // ✅ Then run every 1 minute
-        setInterval(async () => {
-  try {
-    if (mongoose.connection.readyState !== 1) {
-      console.warn("Mongo not connected, skipping autoStop");
-      return;
-    }
+      // ✅ Cleanse and sync existing project plans to enforce role-based discipline
+      cleanseAndSyncAllProjectPlans().catch((e) =>
+        console.error("cleanseAndSyncAllProjectPlans first run error:", e)
+      );
 
-    await autoStopAbandonedSessions();
-  } catch (e) {
-    console.error("autoStop interval error (ignored):", e.message);
-  }
-}, 60 * 1000);
+      // ✅ Then run every 1 minute
+      setInterval(async () => {
+        try {
+          if (mongoose.connection.readyState !== 1) {
+            console.warn("Mongo not connected, skipping autoStop");
+            return;
+          }
 
-        });
-      })
-      .catch((err) => {
-        console.error("❌ Mongo connection error:", err.message);
-        process.exit(1);
-      });
+          await autoStopAbandonedSessions();
+        } catch (e) {
+          console.error("autoStop interval error (ignored):", e.message);
+        }
+      }, 60 * 1000);
+
+    });
+  })
+  .catch((err) => {
+    console.error("❌ Mongo connection error:", err.message);
+    process.exit(1);
+  });
 

@@ -13,13 +13,14 @@ const round2 = (n) => Math.round(n * 100) / 100;
 const WORK_TYPES = ["Alpha", "Beta", "CR", "Rework", "poc", "Analysis", "Storyboard QA", "Output QA"]; // 🔹 work type options
 
 
+const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
+
 function ymd(d = new Date()) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const istDate = new Date(new Date(d).getTime() + IST_OFFSET_MS);
+  return istDate.toISOString().slice(0, 10);
 }
 function isValidObjectId(v) { return mongoose.Types.ObjectId.isValid(v); }
-
-const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
 
 /**
  * Calculates effective pause duration in minutes excluding lunch break (2:00 PM to 3:00 PM IST / 14:00 - 15:00 IST).
@@ -504,11 +505,17 @@ router.post("/stop", requireAuth, async (req, res) => {
   if (!session) return res.status(404).json({ error: "No active/paused session found." });
 
   const now = new Date();
+  const todayStr = ymd(now);
 
   // if active, close running segment and add minutes
   if (session.status === "active" && session.currentStart) {
-    session.segments.push({ start: session.currentStart, end: now });
-    const ms = now - new Date(session.currentStart);
+    let end = now;
+    if (session.date && session.date < todayStr) {
+      end = session.lastHeartbeatAt || new Date(new Date(session.currentStart).getTime() + 15 * 60 * 1000);
+      if (end > now) end = now;
+    }
+    session.segments.push({ start: session.currentStart, end });
+    const ms = end.getTime() - new Date(session.currentStart).getTime();
     const minutes = ms > 0 ? (ms / 60000) : 0;
     session.accumulatedMinutes = (session.accumulatedMinutes || 0) + minutes;
     session.currentStart = null;
@@ -624,9 +631,11 @@ router.get("/my", requireAuth, async (req, res) => {
 
 // 🔥 HEARTBEAT – keep active session alive
 router.post("/heartbeat", requireAuth, async (req, res) => {
+  const todayStr = ymd(new Date());
   const result = await WorkSession.updateOne(
     {
       user: req.user._id,
+      date: todayStr,
       status: "active",
       currentStart: { $ne: null },
     },
@@ -1519,6 +1528,8 @@ router.get("/admin/paused-alerts", requireAuth, requireRole("admin"), async (req
 
     for (const s of pausedSessions) {
       if (!s.user) continue;
+      // Do not alert for admin/superadmin test timers
+      if (s.user.role === "admin" || s.user.role === "superadmin") continue;
       const uId = String(s.user._id);
 
       // If this employee is actively working on another task right now, don't alert

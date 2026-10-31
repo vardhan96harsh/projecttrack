@@ -5,6 +5,8 @@ import { requireAuth } from "../middleware/auth.js";
 import WorkSession from "../models/WorkSession.js";
 
 const router = express.Router();
+const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
+const getTodayIST = () => new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 
 /* =====================================================
    USER ROUTES (EMPLOYEE)
@@ -51,7 +53,7 @@ router.post("/", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Invalid project ID" });
     }
 
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayIST();
     const targetDate = date ? String(date).slice(0, 10) : today;
 
     const created = await ManualRemark.create({

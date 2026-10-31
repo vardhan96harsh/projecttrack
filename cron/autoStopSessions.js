@@ -2,10 +2,12 @@
 import WorkSession from "../models/WorkSession.js";
 
 const HEARTBEAT_TIMEOUT_MIN = Number(process.env.HEARTBEAT_TIMEOUT_MIN || 15);
+const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
 
 function ymd(d = new Date()) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const istDate = new Date(new Date(d).getTime() + IST_OFFSET_MS);
+  return istDate.toISOString().slice(0, 10);
 }
 
 export async function autoStopAbandonedSessions() {

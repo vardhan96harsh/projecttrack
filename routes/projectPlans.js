@@ -7,6 +7,7 @@ import Task from "../models/Task.js";
 import User from "../models/User.js";
 import ComplexityConfig from "../models/ComplexityConfig.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { normalizeRoleKey, doesUserMatchTaskRole } from "../utils/roleMapping.js";
 
 const router = express.Router();
 
@@ -20,7 +21,7 @@ function mapRoleToTaskType(role) {
   return "Alpha";
 }
 
-// Helper to sync tasks to Task collection
+// Helper to sync tasks to Task collection with strict discipline enforcement
 async function syncPlanTasksToTaskCollection(plan, userId) {
   if (!plan || !plan.project || !Array.isArray(plan.tasks)) return { createdCount: 0, updatedCount: 0 };
 
@@ -28,8 +29,28 @@ async function syncPlanTasksToTaskCollection(plan, userId) {
   let createdCount = 0;
   let updatedCount = 0;
 
+  // Pre-fetch all active users for robust designation matching
+  const allActiveUsers = await User.find({ status: { $ne: "inactive" } }).select(
+    "_id name email designation role"
+  );
+  const activeUserMap = new Map(allActiveUsers.map((u) => [u._id.toString(), u]));
+
   for (const t of plan.tasks) {
-    if (!t.name || t.isClientTask) continue;
+    const isClient = Boolean(
+      t.isClientTask ||
+      t.role === "Client Stakeholder" ||
+      t.roleCategory === "CLIENT" ||
+      (t.name && (
+        t.name.toLowerCase().includes("client review") ||
+        t.name.toLowerCase().includes("client approval") ||
+        t.name.toLowerCase().includes("client sign-off") ||
+        t.name.toLowerCase().includes("client gold master")
+      ))
+    );
+    if (!t.name || isClient) continue;
+
+    // Determine canonical discipline for this task (ID, DEVELOPER, QA, ANIMATOR, DESIGNER, PM)
+    const taskDiscipline = normalizeRoleKey(t.roleCategory || t.role || t.name);
 
     // Collect assigned user IDs
     let assignedIds = [];
@@ -53,28 +74,41 @@ async function syncPlanTasksToTaskCollection(plan, userId) {
       }
     }
 
-    // Fallback: If no direct resource assigned on task, check assignedTeam matching the role
+    // STRICT DISCIPLINE VALIDATION:
+    // Only users whose designation matches taskDiscipline are allowed!
+    assignedIds = assignedIds.filter((id) => {
+      const uDoc = activeUserMap.get(id.toString());
+      if (!uDoc) return false;
+      return doesUserMatchTaskRole(uDoc, taskDiscipline);
+    });
+
+    // Fallback: If no direct resource assigned on task matching this discipline,
+    // check plan.assignedTeam matching this specific discipline
     if (assignedIds.length === 0 && Array.isArray(plan.assignedTeam)) {
-      const matchingTeam = plan.assignedTeam.filter(
-        (tm) => tm.roleCategory && t.roleCategory && tm.roleCategory.toUpperCase() === t.roleCategory.toUpperCase()
-      );
+      const matchingTeam = plan.assignedTeam.filter((tm) => {
+        const u = tm.user;
+        const uId = typeof u === "object" && u ? (u._id || u.id) : u;
+        const uDoc = uId ? activeUserMap.get(uId.toString()) : null;
+        if (uDoc) {
+          return doesUserMatchTaskRole(uDoc, taskDiscipline);
+        }
+        const memberCat = normalizeRoleKey(tm.roleCategory || tm.designation);
+        return memberCat === taskDiscipline;
+      });
+
       assignedIds = matchingTeam
         .map((tm) => {
           const u = tm.user;
           return typeof u === "object" && u ? (u._id || u.id) : u;
         })
-        .filter((id) => mongoose.Types.ObjectId.isValid(id));
+        .filter((id) => mongoose.Types.ObjectId.isValid(id) && activeUserMap.has(id.toString()));
     }
 
-    // Exclude any inactive users from assignment
-    if (assignedIds.length > 0) {
-      const activeUserDocs = await User.find({
-        _id: { $in: assignedIds },
-        status: { $ne: "inactive" },
-      }).select("_id");
-      const activeSet = new Set(activeUserDocs.map((u) => u._id.toString()));
-      assignedIds = assignedIds.filter((id) => activeSet.has(id.toString()));
-    }
+    // Double check: ensure every assignedId strictly matches taskDiscipline
+    assignedIds = assignedIds.filter((id) => {
+      const uDoc = activeUserMap.get(id.toString());
+      return uDoc && doesUserMatchTaskRole(uDoc, taskDiscipline);
+    });
 
     const validDueDate = t.endDate && !isNaN(new Date(t.endDate).getTime()) ? new Date(t.endDate) : null;
 
@@ -84,7 +118,6 @@ async function syncPlanTasksToTaskCollection(plan, userId) {
         : t.status === "In Progress"
         ? "in_progress"
         : "open";
-
 
     const existing = await Task.findOne({
       project: projectId,
@@ -102,6 +135,7 @@ async function syncPlanTasksToTaskCollection(plan, userId) {
       project: projectId,
       title: t.name.trim(),
       taskType: mapRoleToTaskType(t.role || t.roleCategory),
+      roleCategory: taskDiscipline,
       assignedTo: assignedIds,
       estimatedMinutes: Math.round((Number(t.hours) || 0) * 60),
       dueDate: validDueDate,
@@ -270,6 +304,7 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
       companyId,
       clientName,
       projectType,
+      projectTypes,
       complexity,
       startPhaseId,
       startPhaseName,
@@ -329,11 +364,24 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
       if (!pmUser) validPm = null;
     }
 
+    const effectiveProjectTypes = Array.isArray(projectTypes) && projectTypes.length > 0
+      ? projectTypes
+      : Array.isArray(projectType)
+      ? projectType
+      : typeof projectType === "string" && projectType.includes(",")
+      ? projectType.split(",").map((s) => s.trim()).filter(Boolean)
+      : [projectType || "storyline-360"];
+
+    const effectiveProjectTypeStr = Array.isArray(projectType)
+      ? projectType.join(", ")
+      : projectType || effectiveProjectTypes.join(", ");
+
     const planData = {
       project: projectId,
       company: effectiveCompanyId,
       clientName: clientName || "",
-      projectType: projectType || "storyline-360",
+      projectType: effectiveProjectTypeStr,
+      projectTypes: effectiveProjectTypes,
       complexity: complexity || "Level 2",
       startPhaseId: startPhaseId || null,
       startPhaseName: startPhaseName || null,
@@ -453,5 +501,108 @@ router.delete("/:id", requireAuth, requireRole("admin"), async (req, res) => {
     res.status(500).json({ error: "Failed to delete project plan" });
   }
 });
+
+// ─────────────────────────────────────────────
+// POST /api/project-plans/cleanse-and-sync
+// Cleanse all project plans and tasks to enforce strict role discipline
+// ─────────────────────────────────────────────
+router.post("/cleanse-and-sync", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const result = await cleanseAndSyncAllProjectPlans(req.user._id);
+    res.json(result);
+  } catch (err) {
+    console.error("CLEANSE AND SYNC ERROR:", err);
+    res.status(500).json({ error: "Failed to cleanse and sync project plans" });
+  }
+});
+
+// Master function to cleanse all project plans and standalone tasks in DB
+export async function cleanseAndSyncAllProjectPlans(adminUserId = null) {
+  try {
+    const plans = await ProjectPlan.find({}).populate("assignedTeam.user", "name email designation status role");
+    console.log(`[PlanCleanse] Cleansing and syncing ${plans.length} project plans...`);
+
+    let totalCleaned = 0;
+    for (const plan of plans) {
+      let modified = false;
+
+      // 1. Fix assignedTeam roleCategories to match user's true designation
+      if (Array.isArray(plan.assignedTeam)) {
+        plan.assignedTeam.forEach((tm) => {
+          const userObj = tm.user;
+          const trueDesig = typeof userObj === "object" && userObj ? userObj.designation : tm.designation;
+          const correctCat = normalizeRoleKey(trueDesig || tm.roleCategory);
+          if (tm.roleCategory !== correctCat) {
+            tm.roleCategory = correctCat;
+            modified = true;
+          }
+        });
+      }
+
+      // 2. Sync plan tasks to Task collection with strict discipline enforcement
+      const syncRes = await syncPlanTasksToTaskCollection(plan, adminUserId || plan.updatedBy || plan.projectManager);
+      if (syncRes.createdCount > 0 || syncRes.updatedCount > 0) {
+        modified = true;
+      }
+
+      if (modified) {
+        plan.markModified("assignedTeam");
+        plan.markModified("tasks");
+        await plan.save();
+        totalCleaned++;
+      }
+    }
+
+    // 3. Cleanse any standalone tasks in Task collection (purge client review tasks and enforce strict discipline)
+    const allUsers = await User.find({ status: { $ne: "inactive" } }).select("_id designation role");
+    const userMap = new Map(allUsers.map((u) => [u._id.toString(), u]));
+
+    const allTasks = await Task.find({});
+    for (const task of allTasks) {
+      const isClientTask =
+        task.title.toLowerCase().includes("client review") ||
+        task.title.toLowerCase().includes("client approval") ||
+        task.title.toLowerCase().includes("client sign-off") ||
+        task.title.toLowerCase().includes("client gold master") ||
+        task.description.toLowerCase().includes("role: client stakeholder");
+
+      if (isClientTask) {
+        await Task.findByIdAndDelete(task._id);
+        continue;
+      }
+
+      const taskDiscipline = normalizeRoleKey(task.roleCategory || task.description || task.title);
+      let taskChanged = false;
+
+      if (!task.roleCategory || task.roleCategory !== taskDiscipline) {
+        task.roleCategory = taskDiscipline;
+        taskChanged = true;
+      }
+
+      if (Array.isArray(task.assignedTo) && task.assignedTo.length > 0) {
+        const validIds = task.assignedTo.filter((userId) => {
+          const uDoc = userMap.get(userId.toString());
+          if (!uDoc) return false;
+          return doesUserMatchTaskRole(uDoc, taskDiscipline);
+        });
+
+        if (validIds.length !== task.assignedTo.length) {
+          task.assignedTo = validIds;
+          taskChanged = true;
+        }
+      }
+
+      if (taskChanged) {
+        await task.save();
+      }
+    }
+
+    console.log(`[PlanCleanse] Completed! Cleaned ${totalCleaned} plans and synchronized task collection.`);
+    return { ok: true, cleanedPlans: totalCleaned };
+  } catch (err) {
+    console.error("[PlanCleanse] Error during cleanse:", err);
+    return { ok: false, error: err.message };
+  }
+}
 
 export default router;

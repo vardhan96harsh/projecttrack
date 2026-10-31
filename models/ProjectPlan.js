@@ -22,6 +22,10 @@ const projectPlanSchema = new mongoose.Schema(
       type: String,
       default: "storyline-360",
     },
+    projectTypes: {
+      type: [String],
+      default: ["storyline-360"],
+    },
     complexity: {
       type: String,
       default: "Level 2",

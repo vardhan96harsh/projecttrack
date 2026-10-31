@@ -44,6 +44,11 @@ const workSessionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// 🚀 Performance compound indexes for rapid polling, daily reports, and background cron jobs
+workSessionSchema.index({ user: 1, date: 1, status: 1 });
+workSessionSchema.index({ date: 1, status: 1 });
+workSessionSchema.index({ status: 1, currentStart: 1, lastHeartbeatAt: 1 });
+
 workSessionSchema.methods.totalMinutesNow = function () {
   let total = this.accumulatedMinutes || 0;
   if (this.status === "active" && this.currentStart) {

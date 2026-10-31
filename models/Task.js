@@ -22,6 +22,13 @@ const taskSchema = new mongoose.Schema(
       default: "Alpha",
     },
 
+    // Discipline / Role Category (ID, DEVELOPER, ANIMATOR, DESIGNER, QA, PM)
+    roleCategory: {
+      type: String,
+      default: null,
+      trim: true,
+    },
+
     // Employees assigned to this task
     assignedTo: [
       {

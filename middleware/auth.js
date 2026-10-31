@@ -26,7 +26,7 @@ export const requireAuth = async (req, res, next) => {
   // 🔵 Try DB lookup and verify active status
   let user = null;
   try {
-    user = await User.findById(payload.id).select("_id name email role status");
+    user = await User.findById(payload.id).select("_id name email role status designation");
     if (!user) {
       return res.status(401).json({ error: "User no longer exists", code: "USER_NOT_FOUND" });
     }
@@ -42,6 +42,7 @@ export const requireAuth = async (req, res, next) => {
     _id: payload.id,
     role: payload.role || "employee",
     name: payload.name || "User",
+    designation: payload.designation || null,
   };
 
   next();

@@ -6,6 +6,7 @@ import Project from "../models/Project.js";
 import ProjectPlan from "../models/ProjectPlan.js";
 import User from "../models/User.js";
 import { requireAuth, requireRole } from "../middleware/auth.js";
+import { normalizeRoleKey, doesUserMatchTaskRole } from "../utils/roleMapping.js";
 
 const router = express.Router();
 
@@ -20,14 +21,14 @@ async function syncStatusToProjectPlan(projectId, taskTitle, status) {
         status === "completed"
           ? "Completed"
           : status === "in_progress"
-          ? "In Progress"
-          : status === "blocked"
-          ? "Blocked"
-          : status === "on_hold"
-          ? "On Hold"
-          : status === "review"
-          ? "Review"
-          : "Not Started";
+            ? "In Progress"
+            : status === "blocked"
+              ? "Blocked"
+              : status === "on_hold"
+                ? "On Hold"
+                : status === "review"
+                  ? "Review"
+                  : "Not Started";
 
       plan.tasks.forEach((pt) => {
         if (pt.name && pt.name.trim().toLowerCase() === taskTitle.trim().toLowerCase()) {
@@ -55,14 +56,27 @@ async function syncStatusToProjectPlan(projectId, taskTitle, status) {
 
 // ─────────────────────────────────────────────
 // GET /api/tasks/my/count
-// Return count of open / in_progress tasks for logged-in user
+// Return count of open / in_progress tasks for logged-in user matching their discipline
 // ─────────────────────────────────────────────
 router.get("/my/count", requireAuth, async (req, res) => {
   try {
-    const count = await Task.countDocuments({
+    const userRole = req.user.role;
+    const userDesig = req.user.designation;
+
+    const tasks = await Task.find({
       assignedTo: req.user._id,
       status: { $in: ["open", "in_progress", "not_started"] },
     });
+
+    let count = tasks.length;
+    if (userRole === "employee" && userDesig) {
+      const userNorm = normalizeRoleKey(userDesig);
+      count = tasks.filter((tk) => {
+        const taskNorm = normalizeRoleKey(tk.roleCategory || tk.description || tk.title);
+        return taskNorm === userNorm;
+      }).length;
+    }
+
     res.json({ count });
   } catch (err) {
     console.error("GET MY TASKS COUNT ERROR:", err);
@@ -72,10 +86,13 @@ router.get("/my/count", requireAuth, async (req, res) => {
 
 // ─────────────────────────────────────────────
 // GET /api/tasks/my
-// Return all tasks assigned to logged-in user
+// Return all tasks assigned to logged-in user strictly matching their discipline
 // ─────────────────────────────────────────────
 router.get("/my", requireAuth, async (req, res) => {
   try {
+    const userRole = req.user.role;
+    const userDesig = req.user.designation;
+
     const tasks = await Task.find({ assignedTo: req.user._id })
       .populate({
         path: "project",
@@ -89,7 +106,17 @@ router.get("/my", requireAuth, async (req, res) => {
       .populate("createdBy", "name")
       .sort({ dueDate: 1, createdAt: -1 });
 
-    res.json(tasks);
+    // Strict role discipline filter for employees
+    let filteredTasks = tasks;
+    if (userRole === "employee" && userDesig) {
+      const userNorm = normalizeRoleKey(userDesig);
+      filteredTasks = tasks.filter((tk) => {
+        const taskNorm = normalizeRoleKey(tk.roleCategory || tk.description || tk.title);
+        return taskNorm === userNorm;
+      });
+    }
+
+    res.json(filteredTasks);
   } catch (err) {
     console.error("GET MY TASKS ERROR:", err);
     res.status(500).json({ error: "Failed to fetch user tasks" });
@@ -211,19 +238,23 @@ router.post("/", requireAuth, requireRole("admin"), async (req, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
+    const taskDiscipline = normalizeRoleKey(taskType || description || title);
+
     let validAssignees = Array.isArray(assignedTo)
       ? assignedTo.filter((id) => mongoose.Types.ObjectId.isValid(id))
       : [];
     if (validAssignees.length > 0) {
-      const activeUsers = await User.find({ _id: { $in: validAssignees }, status: { $ne: "inactive" } }).select("_id");
-      const activeSet = new Set(activeUsers.map((u) => u._id.toString()));
-      validAssignees = validAssignees.filter((id) => activeSet.has(id.toString()));
+      const activeUsers = await User.find({ _id: { $in: validAssignees }, status: { $ne: "inactive" } }).select("_id designation role");
+      validAssignees = activeUsers
+        .filter((u) => doesUserMatchTaskRole(u, taskDiscipline))
+        .map((u) => u._id);
     }
 
     const task = await Task.create({
       project: projectId,
       title: title.trim(),
       taskType: taskType || "Alpha",
+      roleCategory: taskDiscipline,
       assignedTo: validAssignees,
       estimatedMinutes: estimatedMinutes ? Number(estimatedMinutes) : null,
       dueDate: dueDate || null,
@@ -262,13 +293,21 @@ router.put("/:id", requireAuth, requireRole("admin"), async (req, res) => {
       description,
     } = req.body;
 
+    const existingTask = await Task.findById(req.params.id);
+    if (!existingTask) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+
+    const taskDiscipline = normalizeRoleKey(taskType || description || title || existingTask.roleCategory || existingTask.title);
+
     let validAssignees = Array.isArray(assignedTo)
       ? assignedTo.filter((id) => mongoose.Types.ObjectId.isValid(id))
       : [];
     if (validAssignees.length > 0) {
-      const activeUsers = await User.find({ _id: { $in: validAssignees }, status: { $ne: "inactive" } }).select("_id");
-      const activeSet = new Set(activeUsers.map((u) => u._id.toString()));
-      validAssignees = validAssignees.filter((id) => activeSet.has(id.toString()));
+      const activeUsers = await User.find({ _id: { $in: validAssignees }, status: { $ne: "inactive" } }).select("_id designation role");
+      validAssignees = activeUsers
+        .filter((u) => doesUserMatchTaskRole(u, taskDiscipline))
+        .map((u) => u._id);
     }
 
     const updated = await Task.findByIdAndUpdate(
@@ -276,6 +315,7 @@ router.put("/:id", requireAuth, requireRole("admin"), async (req, res) => {
       {
         ...(title?.trim() && { title: title.trim() }),
         ...(taskType && { taskType }),
+        roleCategory: taskDiscipline,
         ...(assignedTo !== undefined && { assignedTo: validAssignees }),
         ...(estimatedMinutes !== undefined && {
           estimatedMinutes: estimatedMinutes ? Number(estimatedMinutes) : null,
