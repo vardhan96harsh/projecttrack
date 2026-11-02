@@ -23,6 +23,67 @@ function ymd(d = new Date()) {
 function isValidObjectId(v) { return mongoose.Types.ObjectId.isValid(v); }
 
 /**
+ * Calculates live session minutes safely.
+ * - Guards against corrupt runaway accumulatedMinutes (> 1440 min/day).
+ * - Prevents double counting if closed segments already cover time up to or past currentStart.
+ * - Freezes abandoned active sessions if heartbeats ceased > 15 minutes ago.
+ * - Caps continuous active time and guarantees total never exceeds 24 hours (1440 min).
+ */
+export function calculateLiveSessionMinutes(s) {
+  if (!s) return 0;
+  let minutes = Number(s.accumulatedMinutes) || 0;
+  let maxClosedEnd = 0;
+
+  if (Array.isArray(s.segments) && s.segments.length > 0) {
+    let segMs = 0;
+    for (const seg of s.segments) {
+      if (seg.start && seg.end) {
+        const st = new Date(seg.start).getTime();
+        const et = new Date(seg.end).getTime();
+        if (et > st) {
+          segMs += (et - st);
+          if (et > maxClosedEnd) maxClosedEnd = et;
+        }
+      }
+    }
+    // If stored accumulatedMinutes is obviously corrupt or drastically desynced, trust verified segments
+    if (minutes > 1440 || (segMs > 0 && Math.abs(minutes - segMs / 60000) > 120)) {
+      minutes = Math.min(1440, segMs / 60000);
+    }
+  }
+
+  // Only add live active time if session is truly active and not paused
+  if (s.status === "active" && s.currentStart) {
+    const pausedTime = s.pausedAt ? new Date(s.pausedAt).getTime() : 0;
+    const startTime = new Date(s.currentStart).getTime();
+
+    // If session was pausedAt >= currentStart, it's not currently running live
+    if (pausedTime < startTime) {
+      // Effective start cannot precede any already-recorded closed segments to prevent double-counting
+      const effectiveStart = Math.max(startTime, maxClosedEnd);
+      const now = Date.now();
+      let effectiveEnd = now;
+
+      // Abandoned session defense: if heartbeat is older than 15 mins, freeze active time
+      if (s.lastHeartbeatAt) {
+        const lastHb = new Date(s.lastHeartbeatAt).getTime();
+        if (now - lastHb > 15 * 60 * 1000) {
+          effectiveEnd = Math.min(now, lastHb + 15 * 60 * 1000);
+        }
+      }
+
+      const elapsedMs = effectiveEnd - effectiveStart;
+      if (elapsedMs > 0) {
+        const activeMinutes = elapsedMs / 60000;
+        minutes += Math.min(activeMinutes, 840);
+      }
+    }
+  }
+
+  return Math.min(1440, Math.max(0, round2(minutes)));
+}
+
+/**
  * Calculates effective pause duration in minutes excluding lunch break (2:00 PM to 3:00 PM IST / 14:00 - 15:00 IST).
  * Any pause overlap between 14:00:00 and 15:00:00 IST is deducted so lunch is not counted as unauthorized pause.
  * 🔒 Timezone-independent: works consistently whether server runs in UTC, IST, or any other timezone.
@@ -320,10 +381,28 @@ router.post("/pause", requireAuth, async (req, res) => {
 
   const now = new Date();
   if (session.currentStart) {
-    session.segments.push({ start: session.currentStart, end: now });
-    const ms = now - new Date(session.currentStart);
-    const minutes = ms > 0 ? (ms / 60000) : 0;
-    session.accumulatedMinutes = (session.accumulatedMinutes || 0) + minutes;
+    let maxClosedEnd = 0;
+    if (Array.isArray(session.segments)) {
+      for (const seg of session.segments) {
+        if (seg.end) {
+          const et = new Date(seg.end).getTime();
+          if (et > maxClosedEnd) maxClosedEnd = et;
+        }
+      }
+    }
+    const effectiveStart = Math.max(new Date(session.currentStart).getTime(), maxClosedEnd);
+    if (now.getTime() > effectiveStart) {
+      session.segments.push({ start: new Date(effectiveStart), end: now });
+    }
+    let segMs = 0;
+    for (const seg of session.segments) {
+      if (seg.start && seg.end) {
+        const st = new Date(seg.start).getTime();
+        const et = new Date(seg.end).getTime();
+        if (et > st) segMs += (et - st);
+      }
+    }
+    session.accumulatedMinutes = Math.min(1440, Math.round((segMs / 60000) * 100) / 100);
     session.currentStart = null;
   }
 
@@ -507,17 +586,35 @@ router.post("/stop", requireAuth, async (req, res) => {
   const now = new Date();
   const todayStr = ymd(now);
 
-  // if active, close running segment and add minutes
+  // if active, close running segment and add minutes safely
   if (session.status === "active" && session.currentStart) {
     let end = now;
     if (session.date && session.date < todayStr) {
       end = session.lastHeartbeatAt || new Date(new Date(session.currentStart).getTime() + 15 * 60 * 1000);
       if (end > now) end = now;
     }
-    session.segments.push({ start: session.currentStart, end });
-    const ms = end.getTime() - new Date(session.currentStart).getTime();
-    const minutes = ms > 0 ? (ms / 60000) : 0;
-    session.accumulatedMinutes = (session.accumulatedMinutes || 0) + minutes;
+    let maxClosedEnd = 0;
+    if (Array.isArray(session.segments)) {
+      for (const seg of session.segments) {
+        if (seg.end) {
+          const et = new Date(seg.end).getTime();
+          if (et > maxClosedEnd) maxClosedEnd = et;
+        }
+      }
+    }
+    const effectiveStart = Math.max(new Date(session.currentStart).getTime(), maxClosedEnd);
+    if (end.getTime() > effectiveStart) {
+      session.segments.push({ start: new Date(effectiveStart), end });
+    }
+    let segMs = 0;
+    for (const seg of session.segments) {
+      if (seg.start && seg.end) {
+        const st = new Date(seg.start).getTime();
+        const et = new Date(seg.end).getTime();
+        if (et > st) segMs += (et - st);
+      }
+    }
+    session.accumulatedMinutes = Math.min(1440, Math.round((segMs / 60000) * 100) / 100);
     session.currentStart = null;
   }
 
@@ -596,11 +693,7 @@ router.get("/my", requireAuth, async (req, res) => {
       accMins = Math.min(1440, round2(segMs / 60000));
     }
 
-    let total = accMins;
-
-    if (s.status === "active" && s.currentStart) {
-      total += (Date.now() - new Date(s.currentStart)) / 60000;
-    }
+    const liveTotal = calculateLiveSessionMinutes(s);
 
     return {
       _id: s._id,
@@ -615,7 +708,7 @@ router.get("/my", requireAuth, async (req, res) => {
       categoryName: s.project?.category?.name || "—",
       currentStart: s.currentStart || null,
       accumulatedMinutes: accMins,
-      totalMinutes: round2(total),
+      totalMinutes: liveTotal,
       segments: s.segments || [],
       remarks: s.remarks || "",
       taskType: s.taskType || null,
@@ -956,10 +1049,7 @@ router.get("/admin/live-status", requireAuth, requireRole("admin"), async (req, 
           }
           accMins = Math.min(1440, round2(segMs / 60000));
         }
-        let sessionTotal = accMins;
-        if (s.status === "active" && s.currentStart) {
-          sessionTotal += Math.max(0, (Date.now() - new Date(s.currentStart).getTime()) / 60000);
-        }
+        const sessionTotal = calculateLiveSessionMinutes(s);
         todayMinutes += sessionTotal;
       }
       todayMinutes = round2(todayMinutes);
@@ -993,10 +1083,7 @@ router.get("/admin/live-status", requireAuth, requireRole("admin"), async (req, 
 
       let currentSessionData = null;
       if (latestSession) {
-        let liveDuration = latestSession.accumulatedMinutes || 0;
-        if (latestSession.status === "active" && latestSession.currentStart) {
-          liveDuration += Math.max(0, (Date.now() - new Date(latestSession.currentStart).getTime()) / 60000);
-        }
+        let liveDuration = calculateLiveSessionMinutes(latestSession);
 
         currentSessionData = {
           _id: latestSession._id,
@@ -1171,15 +1258,11 @@ router.get("/admin/list", requireAuth, requireRole("admin"), async (req, res) =>
       }
       accMins = Math.min(1440, round2(segMs / 60000));
     }
-    let total = accMins;
-    if (s.status === "active" && s.currentStart) {
-      total += (Date.now() - new Date(s.currentStart)) / 60000;
-    }
     return {
       _id: s._id,
       date: s.date,
       status: s.status,
-      totalMinutes: round2(total),
+      totalMinutes: calculateLiveSessionMinutes(s),
       segments: s.segments || [],
       remarks: s.remarks || "",
       manualRemarks: remarkMap.get(`${s.date}|${s.user?._id}`) || [],

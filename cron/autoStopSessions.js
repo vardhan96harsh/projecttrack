@@ -22,10 +22,30 @@ export async function autoStopAbandonedSessions() {
 
     for (const s of previousDaySessions) {
       if (s.status === "active" && s.currentStart) {
-        const end = s.lastHeartbeatAt || new Date(new Date(s.currentStart).getTime() + HEARTBEAT_TIMEOUT_MIN * 60 * 1000);
-        s.segments.push({ start: s.currentStart, end, source: "auto-stop-day-end" });
-        const ms = end.getTime() - new Date(s.currentStart).getTime();
-        s.accumulatedMinutes = (s.accumulatedMinutes || 0) + (ms > 0 ? ms / 60000 : 0);
+        let maxClosedEnd = 0;
+        if (Array.isArray(s.segments)) {
+          for (const seg of s.segments) {
+            if (seg.end) {
+              const et = new Date(seg.end).getTime();
+              if (et > maxClosedEnd) maxClosedEnd = et;
+            }
+          }
+        }
+        const effectiveStart = Math.max(new Date(s.currentStart).getTime(), maxClosedEnd);
+        let end = s.lastHeartbeatAt || new Date(effectiveStart + HEARTBEAT_TIMEOUT_MIN * 60 * 1000);
+        if (end.getTime() > effectiveStart) {
+          s.segments.push({ start: new Date(effectiveStart), end, source: "auto-stop-day-end" });
+        }
+        // Recalculate accumulatedMinutes from clean segments
+        let segMs = 0;
+        for (const seg of s.segments) {
+          if (seg.start && seg.end) {
+            const st = new Date(seg.start).getTime();
+            const et = new Date(seg.end).getTime();
+            if (et > st) segMs += (et - st);
+          }
+        }
+        s.accumulatedMinutes = Math.min(1440, Math.round((segMs / 60000) * 100) / 100);
         s.currentStart = null;
       }
       s.status = "stopped";
@@ -55,19 +75,43 @@ export async function autoStopAbandonedSessions() {
   });
 
   for (const s of sessions) {
+    let maxClosedEnd = 0;
+    if (Array.isArray(s.segments)) {
+      for (const seg of s.segments) {
+        if (seg.end) {
+          const et = new Date(seg.end).getTime();
+          if (et > maxClosedEnd) maxClosedEnd = et;
+        }
+      }
+    }
+
+    const effectiveStart = Math.max(new Date(s.currentStart).getTime(), maxClosedEnd);
     let endTime = s.lastHeartbeatAt;
-    if (!endTime || endTime < new Date(s.currentStart)) {
-      endTime = new Date(
-        new Date(s.currentStart).getTime() + HEARTBEAT_TIMEOUT_MIN * 60 * 1000
-      );
+    if (!endTime || endTime.getTime() < effectiveStart) {
+      endTime = new Date(effectiveStart + HEARTBEAT_TIMEOUT_MIN * 60 * 1000);
     }
     if (endTime > new Date()) endTime = new Date();
 
-    s.segments.push({ start: s.currentStart, end: endTime, source: "auto-pause-heartbeat" });
+    if (endTime.getTime() > effectiveStart) {
+      s.segments.push({
+        start: new Date(effectiveStart),
+        end: endTime,
+        source: "auto-pause-heartbeat",
+      });
+    }
 
-    const ms = endTime.getTime() - new Date(s.currentStart).getTime();
-    const minutes = ms > 0 ? ms / 60000 : 0;
-    s.accumulatedMinutes = (s.accumulatedMinutes || 0) + minutes;
+    // Recalculate accumulatedMinutes strictly from clean non-overlapping segments
+    let segMs = 0;
+    if (Array.isArray(s.segments)) {
+      for (const seg of s.segments) {
+        if (seg.start && seg.end) {
+          const st = new Date(seg.start).getTime();
+          const et = new Date(seg.end).getTime();
+          if (et > st) segMs += (et - st);
+        }
+      }
+    }
+    s.accumulatedMinutes = Math.min(1440, Math.round((segMs / 60000) * 100) / 100);
 
     s.currentStart = null;
     s.status = "paused"; // idle → pause, not stop

@@ -27,32 +27,63 @@ function parseDateRange(from, to) {
 
 /**
  * Calculates session hours safely.
- * Caps runaway active time for abandoned/stale sessions (max 14 hours continuous)
- * and guards against corrupt runaway accumulatedMinutes (> 1440 min/day).
+ * - Guards against corrupt runaway accumulatedMinutes (> 1440 min/day).
+ * - Prevents double counting if closed segments already cover time up to or past currentStart.
+ * - Freezes abandoned active sessions if heartbeats ceased > 15 minutes ago.
+ * - Caps continuous active time and guarantees total never exceeds 24 hours (1440 min).
  */
 function calculateSessionHours(s) {
   let minutes = Number(s.accumulatedMinutes) || 0;
-  if (minutes > 1440 && Array.isArray(s.segments) && s.segments.length > 0) {
+  let maxClosedEnd = 0;
+
+  if (Array.isArray(s.segments) && s.segments.length > 0) {
     let segMs = 0;
     for (const seg of s.segments) {
       if (seg.start && seg.end) {
         const st = new Date(seg.start).getTime();
         const et = new Date(seg.end).getTime();
-        if (et > st) segMs += (et - st);
+        if (et > st) {
+          segMs += (et - st);
+          if (et > maxClosedEnd) maxClosedEnd = et;
+        }
       }
     }
-    minutes = Math.min(1440, segMs / 60000);
-  }
-
-  if (s.status === "active" && s.currentStart) {
-    const elapsedMs = Date.now() - new Date(s.currentStart).getTime();
-    if (elapsedMs > 0) {
-      const activeMinutes = elapsedMs / 60000;
-      // Cap at 14 hours (840 minutes) max continuous shift per active session
-      minutes += Math.min(activeMinutes, 840);
+    // If stored accumulatedMinutes is obviously corrupt or drastically desynced, trust verified segments
+    if (minutes > 1440 || (segMs > 0 && Math.abs(minutes - segMs / 60000) > 120)) {
+      minutes = Math.min(1440, segMs / 60000);
     }
   }
-  return Math.max(0, minutes) / 60;
+
+  // Only add live active time if session is truly active and not paused
+  if (s.status === "active" && s.currentStart) {
+    const pausedTime = s.pausedAt ? new Date(s.pausedAt).getTime() : 0;
+    const startTime = new Date(s.currentStart).getTime();
+
+    // If session was pausedAt >= currentStart, it's not currently running live
+    if (pausedTime < startTime) {
+      // Effective start cannot precede any already-recorded closed segments to prevent double-counting
+      const effectiveStart = Math.max(startTime, maxClosedEnd);
+      const now = Date.now();
+      let effectiveEnd = now;
+
+      // Abandoned session defense: if heartbeat is older than 15 mins, freeze active time
+      if (s.lastHeartbeatAt) {
+        const lastHb = new Date(s.lastHeartbeatAt).getTime();
+        if (now - lastHb > 15 * 60 * 1000) {
+          effectiveEnd = Math.min(now, lastHb + 15 * 60 * 1000);
+        }
+      }
+
+      const elapsedMs = effectiveEnd - effectiveStart;
+      if (elapsedMs > 0) {
+        const activeMinutes = elapsedMs / 60000;
+        // Cap continuous shift at 14 hours (840 mins)
+        minutes += Math.min(activeMinutes, 840);
+      }
+    }
+  }
+
+  return Math.min(1440, Math.max(0, minutes)) / 60;
 }
 
 /**
