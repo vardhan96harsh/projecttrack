@@ -47,10 +47,17 @@ app.use(
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
+    exposedHeaders: ["Date", "X-Server-Time"],
     credentials: true,
   })
 );
 app.options("*", cors());
+
+// Attach authoritative server timestamp for client clock synchronization and skew defense
+app.use((_req, res, next) => {
+  res.setHeader("X-Server-Time", Date.now().toString());
+  next();
+});
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
