@@ -1,7 +1,7 @@
 // cron/autoStopSessions.js
 import WorkSession from "../models/WorkSession.js";
 
-const HEARTBEAT_TIMEOUT_MIN = Number(process.env.HEARTBEAT_TIMEOUT_MIN || 15);
+const HEARTBEAT_TIMEOUT_MIN = Number(process.env.HEARTBEAT_TIMEOUT_MIN || 60);
 const IST_OFFSET_MS = 5.5 * 3600 * 1000; // 5 hours 30 mins (Asia/Kolkata / IST)
 
 function ymd(d = new Date()) {

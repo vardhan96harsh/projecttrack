@@ -67,8 +67,8 @@ export function calculateLiveSessionMinutes(s) {
       // Abandoned session defense: if heartbeat is older than 15 mins, freeze active time
       if (s.lastHeartbeatAt) {
         const lastHb = new Date(s.lastHeartbeatAt).getTime();
-        if (now - lastHb > 15 * 60 * 1000) {
-          effectiveEnd = Math.min(now, lastHb + 15 * 60 * 1000);
+        if (now - lastHb > 60 * 60 * 1000) {
+          effectiveEnd = Math.min(now, lastHb + 60 * 60 * 1000);
         }
       }
 
